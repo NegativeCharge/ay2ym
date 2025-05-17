@@ -76,19 +76,16 @@ void parse_ay_file(const char* filename, AYFile* ay) {
     ay->firstSong = fgetc(f);
     ay->pSongsStructure = read_be_uint16(f);
 
-    // Author & Misc strings
     read_str_at(f, 12 + ay->pAuthor, ay->author, MAX_STR_LEN);
     read_str_at(f, 14 + ay->pMisc, ay->misc, MAX_STR_LEN);
 
-    // Song Name
     long songStructOffset = 18 + ay->pSongsStructure;
     fseek(f, songStructOffset, SEEK_SET);
     uint16_t pSongName = read_be_uint16(f);
     uint16_t pSongData = read_be_uint16(f);
     read_str_at(f, 18 + ay->pSongsStructure + pSongName, ay->songName, MAX_STR_LEN);
 
-    // Song Data
-    long songDataOffset = 18 + ay->pSongsStructure + 4;
+    long songDataOffset = songStructOffset + 4;
     fseek(f, songDataOffset, SEEK_SET);
     ay->aChan = fgetc(f);
     ay->bChan = fgetc(f);
@@ -101,16 +98,14 @@ void parse_ay_file(const char* filename, AYFile* ay) {
     ay->pPoints = read_be_uint16(f);
     ay->pAddresses = read_be_uint16(f);
 
-    // Pointers data
     long ptrOffset = songDataOffset + 10 + ay->pPoints;
     fseek(f, ptrOffset, SEEK_SET);
     ay->stack = read_be_uint16(f);
     ay->init = read_be_uint16(f);
     ay->interrupt = read_be_uint16(f);
 
-    // Data blocks
     ay->numBlocks = 0;
-    long dataBlockOffset = songDataOffset + 10 + ay->pPoints + 6;
+    long dataBlockOffset = ptrOffset + 6;
     fseek(f, dataBlockOffset, SEEK_SET);
 
     while (ay->numBlocks < MAX_BLOCKS) {
@@ -141,7 +136,7 @@ void parse_ay_file(const char* filename, AYFile* ay) {
 void print_ay_info(const AYFile* ay) {
     printf("FileID: %s | TypeID: %s\n", ay->fileID, ay->typeID);
     printf("FileVersion: %d | PlayerVersion: %d | NumOfSongs: %d | FirstSong: %d\n",
-        ay->fileVersion, ay->playerVersion, ay->numSongs + 1, ay->firstSong + 1);
+        ay->fileVersion, ay->playerVersion, ay->numSongs, ay->firstSong + 1);
     printf("Author: %s | Misc: %s\n", ay->author, ay->misc);
     printf("Song Title: %s\n", ay->songName);
     printf("Channels: A=%d B=%d C=%d Noise=%d | SongLength=%d | FadeLength=%d\n",
@@ -153,6 +148,34 @@ void print_ay_info(const AYFile* ay) {
     }
 }
 
+void list_all_songs(const char* filename, const AYFile* ay) {
+    FILE* f = fopen(filename, "rb");
+    if (!f) {
+        perror("Error opening file for song listing");
+        return;
+    }
+
+    printf("\n-- Songs List --\n");
+
+    long baseOffset = 18 + ay->pSongsStructure;
+
+    for (int i = 0; i <= ay->numSongs; i++) {
+        long songEntryOffset = baseOffset + (i * 4);
+        fseek(f, songEntryOffset, SEEK_SET);
+
+        uint16_t pSongName = read_be_uint16(f);
+        uint16_t pSongData = read_be_uint16(f);
+
+        long songNameOffset = baseOffset + pSongName + (i * 4);
+        char songTitle[MAX_STR_LEN];
+        read_str_at(f, songNameOffset, songTitle, MAX_STR_LEN);
+
+        printf("Song %d: %s (Data Ptr: 0x%04X)\n", i + 1, songTitle, pSongData);
+    }
+
+    fclose(f);
+}
+
 int main(int argc, char* argv[]) {
     if (argc != 2) {
         printf("Usage: %s <ayfile>\n", argv[0]);
@@ -162,5 +185,7 @@ int main(int argc, char* argv[]) {
     AYFile ay;
     parse_ay_file(argv[1], &ay);
     print_ay_info(&ay);
+    list_all_songs(argv[1], &ay);
+
     return 0;
 }
