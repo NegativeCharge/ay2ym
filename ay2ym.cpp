@@ -8,11 +8,9 @@
 #define MAX_STR_LEN 128
 #define MAX_BLOCKS 256
 
-typedef struct {
-    uint16_t addr;
-    uint16_t length;
-    uint16_t offset;
-} DataBlock;
+#define PAUTHOR_OFFSET         12
+#define PMISC_OFFSET           14
+#define PSONGSSTRUCTURE_OFFSET 18
 
 typedef struct {
     char fileID[5];
@@ -28,17 +26,25 @@ typedef struct {
 } AYHeader;
 
 uint16_t read_be_uint16(FILE* f) {
-    uint8_t hi = fgetc(f);
-    uint8_t lo = fgetc(f);
-    return (hi << 8) | lo;
+    int hi = fgetc(f);
+    int lo = fgetc(f);
+    if (hi == EOF || lo == EOF) {
+        fprintf(stderr, "Unexpected EOF while reading uint16\n");
+        exit(1);
+    }
+    return ((uint16_t)hi << 8) | (uint16_t)lo;
 }
 
 void read_str_at(FILE* f, long offset, char* dest, size_t maxLen) {
-    fseek(f, offset, SEEK_SET);
+    if (fseek(f, offset, SEEK_SET) != 0) {
+        perror("Failed to seek in file");
+        dest[0] = '\0';
+        return;
+    }
     size_t i = 0;
     int c;
     while (i < maxLen - 1 && (c = fgetc(f)) != EOF && c != 0) {
-        dest[i++] = c;
+        dest[i++] = (char)c;
     }
     dest[i] = '\0';
 }
@@ -52,50 +58,96 @@ void list_songs_and_blocks(const char* filename) {
 
     AYHeader header;
 
-    fread(header.fileID, 1, 4, f); header.fileID[4] = '\0';
-    fread(header.typeID, 1, 4, f); header.typeID[4] = '\0';
-    header.fileVersion = fgetc(f);
-    header.playerVersion = fgetc(f);
+    if (fread(header.fileID, 1, 4, f) != 4) {
+        fprintf(stderr, "Failed to read fileID\n");
+        fclose(f);
+        exit(1);
+    }
+    header.fileID[4] = '\0';
+
+    if (fread(header.typeID, 1, 4, f) != 4) {
+        fprintf(stderr, "Failed to read typeID\n");
+        fclose(f);
+        exit(1);
+    }
+    header.typeID[4] = '\0';
+
+    int c;
+    c = fgetc(f);
+    if (c == EOF) { perror("Unexpected EOF reading fileVersion"); fclose(f); exit(1); }
+    header.fileVersion = (uint8_t)c;
+
+    c = fgetc(f);
+    if (c == EOF) { perror("Unexpected EOF reading playerVersion"); fclose(f); exit(1); }
+    header.playerVersion = (uint8_t)c;
+
     header.pPlayer = read_be_uint16(f);
     header.pAuthor = read_be_uint16(f);
     header.pMisc = read_be_uint16(f);
-    header.numSongs = fgetc(f);
-    header.firstSong = fgetc(f);
+
+    c = fgetc(f);
+    if (c == EOF) { perror("Unexpected EOF reading numSongs"); fclose(f); exit(1); }
+    header.numSongs = (uint8_t)c;
+
+    c = fgetc(f);
+    if (c == EOF) { perror("Unexpected EOF reading firstSong"); fclose(f); exit(1); }
+    header.firstSong = (uint8_t)c;
+
     header.pSongsStructure = read_be_uint16(f);
 
     printf("FileID: %s | TypeID: %s\n", header.fileID, header.typeID);
     printf("FileVersion: %d | PlayerVersion: %d | NumOfSongs: %d | FirstSong: %d\n",
         header.fileVersion, header.playerVersion, header.numSongs + 1, header.firstSong + 1);
 
-    long baseOffset = 18 + header.pSongsStructure;
+    // Read author and misc strings using offsets relative to file start + defined constants + header pointers
+    char author[MAX_STR_LEN] = "";
+    char misc[MAX_STR_LEN] = "";
+
+    if (header.pAuthor != 0) {
+        read_str_at(f, PAUTHOR_OFFSET + header.pAuthor, author, MAX_STR_LEN);
+    }
+    if (header.pMisc != 0) {
+        read_str_at(f, PMISC_OFFSET + header.pMisc, misc, MAX_STR_LEN);
+    }
+
+    printf("Author: %s | Misc: %s\n", author, misc);
+
+    // Base offset for songs structure
+    long baseOffset = PSONGSSTRUCTURE_OFFSET + header.pSongsStructure;
 
     printf("\n-- Songs List and Data Blocks --\n");
 
     for (int i = 0; i <= header.numSongs; i++) {
         long songEntryOffset = baseOffset + (i * 4);
-        fseek(f, songEntryOffset, SEEK_SET);
+        if (fseek(f, songEntryOffset, SEEK_SET) != 0) {
+            perror("Failed to seek to song entry");
+            continue;
+        }
 
         uint16_t pSongName = read_be_uint16(f);
         uint16_t pSongData = read_be_uint16(f);
 
+        // Calculate song name offset correctly: baseOffset + pSongName + (i * 4)
         long songNameOffset = baseOffset + pSongName + (i * 4);
         char songTitle[MAX_STR_LEN];
         read_str_at(f, songNameOffset, songTitle, MAX_STR_LEN);
 
         printf("\nSong %d: %s (Data Ptr: 0x%04X)\n", i + 1, songTitle, pSongData);
 
-        // Now read song data
         long songDataOffset = baseOffset + pSongData;
-        fseek(f, songDataOffset, SEEK_SET);
+        if (fseek(f, songDataOffset, SEEK_SET) != 0) {
+            perror("Failed to seek to song data");
+            continue;
+        }
 
-        uint8_t aChan = fgetc(f);
-        uint8_t bChan = fgetc(f);
-        uint8_t cChan = fgetc(f);
-        uint8_t noise = fgetc(f);
+        uint8_t aChan = (uint8_t)fgetc(f);
+        uint8_t bChan = (uint8_t)fgetc(f);
+        uint8_t cChan = (uint8_t)fgetc(f);
+        uint8_t noise = (uint8_t)fgetc(f);
         uint16_t songLength = read_be_uint16(f);
         uint16_t fadeLength = read_be_uint16(f);
-        uint8_t hiReg = fgetc(f);
-        uint8_t loReg = fgetc(f);
+        uint8_t hiReg = (uint8_t)fgetc(f);
+        uint8_t loReg = (uint8_t)fgetc(f);
         uint16_t pPoints = read_be_uint16(f);
         uint16_t pAddresses = read_be_uint16(f);
 
@@ -103,22 +155,38 @@ void list_songs_and_blocks(const char* filename) {
         printf("  SongLength=%d | FadeLength=%d | PointsPtr=0x%04X | AddrPtr=0x%04X\n",
             songLength, fadeLength, pPoints, pAddresses);
 
-        // Now read Data Blocks
-        long blockOffset = songDataOffset + 10 + pPoints + 6;
-        fseek(f, blockOffset, SEEK_SET);
+        long blockOffset = songDataOffset + pAddresses;
 
+        printf("  Song Data Offset: 0x%lX | Blocks Table Offset: 0x%lX\n", songDataOffset, blockOffset);
+
+        if (fseek(f, blockOffset, SEEK_SET) != 0) {
+            perror("Failed to seek to song data blocks");
+            continue;
+        }
+
+        long currentBlockOffset = blockOffset;
         int blockNum = 0;
         while (1) {
+            if (fseek(f, currentBlockOffset, SEEK_SET) != 0) {
+                perror("Failed to seek to block entry");
+                break;
+            }
+
             uint16_t addr = read_be_uint16(f);
-            if (addr == 0 || feof(f)) break;
+            if (addr == 0) break;  // Only terminate on addr==0
 
             uint16_t length = read_be_uint16(f);
-            if (length == 0 || feof(f)) break;
-
             uint16_t offset = read_be_uint16(f);
 
-            printf("  Block %d: Addr=0x%04X Length=%d Offset=0x%04X\n",
-                ++blockNum, addr, length, offset);
+            printf("  Block %d: Addr=0x%04X Length=%d Offset=0x%04X (File Offset: 0x%lX)\n",
+                ++blockNum, addr, length, offset, currentBlockOffset);
+
+            currentBlockOffset += 6;
+
+            if (blockNum >= MAX_BLOCKS) {
+                printf("  Too many blocks, stopping.\n");
+                break;
+            }
         }
     }
 
