@@ -25,22 +25,7 @@ typedef struct {
     uint8_t numSongs;
     uint8_t firstSong;
     uint16_t pSongsStructure;
-
-    char author[MAX_STR_LEN];
-    char misc[MAX_STR_LEN];
-    char songName[MAX_STR_LEN];
-
-    uint8_t aChan, bChan, cChan, noise;
-    uint16_t songLength, fadeLength;
-    uint8_t hiReg, loReg;
-    uint16_t pPoints, pAddresses;
-
-    uint16_t stack, init, interrupt;
-
-    DataBlock blocks[MAX_BLOCKS];
-    int numBlocks;
-
-} AYFile;
+} AYHeader;
 
 uint16_t read_be_uint16(FILE* f) {
     uint8_t hi = fgetc(f);
@@ -58,108 +43,35 @@ void read_str_at(FILE* f, long offset, char* dest, size_t maxLen) {
     dest[i] = '\0';
 }
 
-void parse_ay_file(const char* filename, AYFile* ay) {
+void list_songs_and_blocks(const char* filename) {
     FILE* f = fopen(filename, "rb");
     if (!f) {
         perror("Error opening file");
         exit(1);
     }
 
-    fread(ay->fileID, 1, 4, f); ay->fileID[4] = '\0';
-    fread(ay->typeID, 1, 4, f); ay->typeID[4] = '\0';
-    ay->fileVersion = fgetc(f);
-    ay->playerVersion = fgetc(f);
-    ay->pPlayer = read_be_uint16(f);
-    ay->pAuthor = read_be_uint16(f);
-    ay->pMisc = read_be_uint16(f);
-    ay->numSongs = fgetc(f);
-    ay->firstSong = fgetc(f);
-    ay->pSongsStructure = read_be_uint16(f);
+    AYHeader header;
 
-    read_str_at(f, 12 + ay->pAuthor, ay->author, MAX_STR_LEN);
-    read_str_at(f, 14 + ay->pMisc, ay->misc, MAX_STR_LEN);
+    fread(header.fileID, 1, 4, f); header.fileID[4] = '\0';
+    fread(header.typeID, 1, 4, f); header.typeID[4] = '\0';
+    header.fileVersion = fgetc(f);
+    header.playerVersion = fgetc(f);
+    header.pPlayer = read_be_uint16(f);
+    header.pAuthor = read_be_uint16(f);
+    header.pMisc = read_be_uint16(f);
+    header.numSongs = fgetc(f);
+    header.firstSong = fgetc(f);
+    header.pSongsStructure = read_be_uint16(f);
 
-    long songStructOffset = 18 + ay->pSongsStructure;
-    fseek(f, songStructOffset, SEEK_SET);
-    uint16_t pSongName = read_be_uint16(f);
-    uint16_t pSongData = read_be_uint16(f);
-    read_str_at(f, 18 + ay->pSongsStructure + pSongName, ay->songName, MAX_STR_LEN);
-
-    long songDataOffset = songStructOffset + 4;
-    fseek(f, songDataOffset, SEEK_SET);
-    ay->aChan = fgetc(f);
-    ay->bChan = fgetc(f);
-    ay->cChan = fgetc(f);
-    ay->noise = fgetc(f);
-    ay->songLength = read_be_uint16(f);
-    ay->fadeLength = read_be_uint16(f);
-    ay->hiReg = fgetc(f);
-    ay->loReg = fgetc(f);
-    ay->pPoints = read_be_uint16(f);
-    ay->pAddresses = read_be_uint16(f);
-
-    long ptrOffset = songDataOffset + 10 + ay->pPoints;
-    fseek(f, ptrOffset, SEEK_SET);
-    ay->stack = read_be_uint16(f);
-    ay->init = read_be_uint16(f);
-    ay->interrupt = read_be_uint16(f);
-
-    ay->numBlocks = 0;
-    long dataBlockOffset = ptrOffset + 6;
-    fseek(f, dataBlockOffset, SEEK_SET);
-
-    while (ay->numBlocks < MAX_BLOCKS) {
-        DataBlock* blk = &ay->blocks[ay->numBlocks];
-        int hi = fgetc(f);
-        int lo = fgetc(f);
-        if (hi == EOF || lo == EOF) break;
-        blk->addr = (hi << 8) | lo;
-        if (blk->addr == 0) break;
-
-        hi = fgetc(f);
-        lo = fgetc(f);
-        if (hi == EOF || lo == EOF) break;
-        blk->length = (hi << 8) | lo;
-        if (blk->length == 0) break;
-
-        hi = fgetc(f);
-        lo = fgetc(f);
-        if (hi == EOF || lo == EOF) break;
-        blk->offset = (hi << 8) | lo;
-
-        ay->numBlocks++;
-    }
-
-    fclose(f);
-}
-
-void print_ay_info(const AYFile* ay) {
-    printf("FileID: %s | TypeID: %s\n", ay->fileID, ay->typeID);
+    printf("FileID: %s | TypeID: %s\n", header.fileID, header.typeID);
     printf("FileVersion: %d | PlayerVersion: %d | NumOfSongs: %d | FirstSong: %d\n",
-        ay->fileVersion, ay->playerVersion, ay->numSongs, ay->firstSong + 1);
-    printf("Author: %s | Misc: %s\n", ay->author, ay->misc);
-    printf("Song Title: %s\n", ay->songName);
-    printf("Channels: A=%d B=%d C=%d Noise=%d | SongLength=%d | FadeLength=%d\n",
-        ay->aChan, ay->bChan, ay->cChan, ay->noise, ay->songLength, ay->fadeLength);
-    printf("Data Blocks: %d\n", ay->numBlocks);
-    for (int i = 0; i < ay->numBlocks; ++i) {
-        printf("  Block %d: Addr=0x%04X Length=%d Offset=0x%04X\n",
-            i + 1, ay->blocks[i].addr, ay->blocks[i].length, ay->blocks[i].offset);
-    }
-}
+        header.fileVersion, header.playerVersion, header.numSongs + 1, header.firstSong + 1);
 
-void list_all_songs(const char* filename, const AYFile* ay) {
-    FILE* f = fopen(filename, "rb");
-    if (!f) {
-        perror("Error opening file for song listing");
-        return;
-    }
+    long baseOffset = 18 + header.pSongsStructure;
 
-    printf("\n-- Songs List --\n");
+    printf("\n-- Songs List and Data Blocks --\n");
 
-    long baseOffset = 18 + ay->pSongsStructure;
-
-    for (int i = 0; i <= ay->numSongs; i++) {
+    for (int i = 0; i <= header.numSongs; i++) {
         long songEntryOffset = baseOffset + (i * 4);
         fseek(f, songEntryOffset, SEEK_SET);
 
@@ -170,7 +82,44 @@ void list_all_songs(const char* filename, const AYFile* ay) {
         char songTitle[MAX_STR_LEN];
         read_str_at(f, songNameOffset, songTitle, MAX_STR_LEN);
 
-        printf("Song %d: %s (Data Ptr: 0x%04X)\n", i + 1, songTitle, pSongData);
+        printf("\nSong %d: %s (Data Ptr: 0x%04X)\n", i + 1, songTitle, pSongData);
+
+        // Now read song data
+        long songDataOffset = baseOffset + pSongData;
+        fseek(f, songDataOffset, SEEK_SET);
+
+        uint8_t aChan = fgetc(f);
+        uint8_t bChan = fgetc(f);
+        uint8_t cChan = fgetc(f);
+        uint8_t noise = fgetc(f);
+        uint16_t songLength = read_be_uint16(f);
+        uint16_t fadeLength = read_be_uint16(f);
+        uint8_t hiReg = fgetc(f);
+        uint8_t loReg = fgetc(f);
+        uint16_t pPoints = read_be_uint16(f);
+        uint16_t pAddresses = read_be_uint16(f);
+
+        printf("  Channels: A=%d B=%d C=%d Noise=%d\n", aChan, bChan, cChan, noise);
+        printf("  SongLength=%d | FadeLength=%d | PointsPtr=0x%04X | AddrPtr=0x%04X\n",
+            songLength, fadeLength, pPoints, pAddresses);
+
+        // Now read Data Blocks
+        long blockOffset = songDataOffset + 10 + pPoints + 6;
+        fseek(f, blockOffset, SEEK_SET);
+
+        int blockNum = 0;
+        while (1) {
+            uint16_t addr = read_be_uint16(f);
+            if (addr == 0 || feof(f)) break;
+
+            uint16_t length = read_be_uint16(f);
+            if (length == 0 || feof(f)) break;
+
+            uint16_t offset = read_be_uint16(f);
+
+            printf("  Block %d: Addr=0x%04X Length=%d Offset=0x%04X\n",
+                ++blockNum, addr, length, offset);
+        }
     }
 
     fclose(f);
@@ -182,10 +131,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    AYFile ay;
-    parse_ay_file(argv[1], &ay);
-    print_ay_info(&ay);
-    list_all_songs(argv[1], &ay);
-
+    list_songs_and_blocks(argv[1]);
     return 0;
 }
