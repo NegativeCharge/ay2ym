@@ -18,5 +18,22 @@
     <ClCompile Include="ay2ym.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="z80emu\z80emu.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="z80emu\z80emu.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="z80emu\z80config.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="z80emu\z80user.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ay2ym.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
