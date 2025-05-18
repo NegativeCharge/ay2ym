@@ -32,6 +32,9 @@ extern "C" {
 // System call handler for I/O traps
 extern void SystemCall(AY2YM* ay2ym);
 
+uint8_t ay2ym_in(void* context, uint16_t port, uint64_t elapsed_cycles);
+void ay2ym_out(void* context, uint16_t port, uint8_t value, uint64_t elapsed_cycles);
+
 #ifdef __cplusplus
 }
 #endif

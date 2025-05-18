@@ -53,34 +53,14 @@ extern "C" {
 /* Input/output macros */
 #define Z80_INPUT_BYTE(port, x)                                         \
 {                                                                       \
-    AY2YM *ctx = (AY2YM *)context;                                      \
-    if ((port) == 0xBFFD) {                                             \
-        /* Read from AY register */                                     \
-        (x) = ctx->ay_regs[ctx->addr_latch];                            \
-    } else if ((port & 0xFF) == 0xFE) {                                \
-        (x) = ctx->beeper;                                              \
-    } else {                                                            \
-        SystemCall(ctx);                                                \
-        (x) = 0xFF; /* Default input for other ports */                 \
-    }                                                                   \
+    uint16_t full_port = ((state->registers.byte[Z80_B] << 8) | (port));\
+    (x) = ay2ym_in(context, full_port, elapsed_cycles);                 \
 }
 
 #define Z80_OUTPUT_BYTE(port, x)                                        \
 {                                                                       \
-    AY2YM *ctx = (AY2YM *)context;                                      \
-    printf("OUT port=0x%04X value=0x%02X\n", (port), (x));              \
-    if ((port) == 0xFFFD) {                                             \
-        /* Latch AY register number */                                  \
-        ctx->addr_latch = (uint8_t)(x & 0x0F);                          \
-    } else if ((port) == 0xBFFD) {                                      \
-        /* Write value to selected AY register */                       \
-        ctx->ay_regs[ctx->addr_latch] = (uint8_t)(x);                   \
-        printf("[AY2YM] Reg[%02X] <= %02X\n", ctx->addr_latch, x);      \
-    } else if ((port & 0xFF) == 0xFE) {                                \
-        /* Update beeper bit 4 */                                       \
-        ctx->beeper = (x & 0x10) ? 1 : 0;                               \
-    }                                                                   \
-    ctx->is_done = 0;                                                   \
+    uint16_t full_port = ((state->registers.byte[Z80_B] << 8) | (port));\
+    ay2ym_out(context, full_port, (uint8_t)(x), elapsed_cycles);        \
 }
 
 #ifdef __cplusplus

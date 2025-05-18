@@ -124,7 +124,7 @@ enum {
 
 typedef struct Z80_STATE {
 
-        int             status;
+        int             status, halted;
 
         union {
 

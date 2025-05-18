@@ -26,6 +26,46 @@ void SystemCall(AY2YM* ctx) {
     }
 }
 
+uint8_t ay2ym_in(void* context, uint16_t port, uint64_t elapsed_cycles) {
+    AY2YM* ctx = (AY2YM*)context;
+    uint8_t value = 0xFF;  // default value if no port matched
+
+    if (port == 0xBFFD) {
+        // Read from AY register selected by addr_latch
+        value = ctx->ay_regs[ctx->addr_latch];
+    }
+    else if ((port & 0xFF) == 0xFE) {
+        // Read beeper state (only low 8 bits of port matter here)
+        value = ctx->beeper;
+    }
+    else {
+        // Unknown port: handle system call or default input
+        SystemCall(ctx);
+        value = 0xFF;
+    }
+
+    return value;
+}
+
+void ay2ym_out(void* context, uint16_t port, uint8_t value, uint64_t elapsed_cycles) {
+    AY2YM* ctx = (AY2YM*)context;
+
+    if (port == 0xFFFD) {
+        // Select AY register index (lower 4 bits only)
+        ctx->addr_latch = value & 0x0F;
+    }
+    else if (port == 0xBFFD) {
+        // Write value to selected AY register
+        ctx->ay_regs[ctx->addr_latch] = value;
+    }
+    else if ((port & 0xFF) == 0xFE) {
+        // Set beeper on/off depending on bit 4 of value
+        ctx->beeper = (value & 0x10) ? 1 : 0;
+    }
+
+    ctx->is_done = 0;  // signal that something changed / needs updating
+}
+
 // Read signed 16-bit big-endian
 static inline int16_t read_be16s(const uint8_t* ptr) {
     return (int16_t)((ptr[0] << 8) | ptr[1]);
@@ -49,6 +89,17 @@ size_t resolve_rel_pointer(const uint8_t* file, size_t size, size_t pointer_pos)
 const char* read_ntstring(const uint8_t* file, size_t size, size_t offset) {
     if (offset >= size) return "(invalid)";
     return (const char*)(file + offset);
+}
+
+static void dump_memory_range(const uint8_t* memory, uint16_t start, uint16_t end) {
+    printf("Memory dump from 0x%04X to 0x%04X:\n", start, end);
+    for (uint16_t addr = start; addr <= end; addr += 16) {
+        printf("0x%04X: ", addr);
+        for (int i = 0; i < 16 && (addr + i) <= end; i++) {
+            printf("%02X ", memory[addr + i]);
+        }
+        printf("\n");
+    }
 }
 
 void dump_relative_pointer(const uint8_t* file, size_t size, size_t pointer_pos, const char* label) {
@@ -99,31 +150,30 @@ void load_blocks(const uint8_t* file, size_t size, size_t p_addresses_offset) {
         }
 
         memcpy(ctx.memory + addr, file + offset_abs, length);
-        printf("Copying block addr=0x%04X length=0x%X from file offset=0x%lX\n", addr, length, (unsigned long)offset_abs);
-        printf("Source bytes: ");
+        printf("\tCopying block addr=0x%04X length=0x%X from file offset=0x%lX\n", addr, length, (unsigned long)offset_abs);
+        printf("\tSource bytes: ");
         for (int i = 0; i < 16 && i < length; i++) {
             printf("%02X ", file[offset_abs + i]);
         }
-        printf("\nDest bytes:   ");
+        printf("\n\tDest bytes:   ");
         for (int i = 0; i < 16 && i < length; i++) {
             printf("%02X ", ctx.memory[addr + i]);
         }
         printf("\n");
 
-        printf("\tLoaded block at 0x%04X, length 0x%04X from offset 0x%04zX\n", addr, length, offset_abs);
+        printf("\tLoaded block at 0x%04X, length 0x%04X from offset 0x%04zX\n\n", addr, length, offset_abs);
 
         pos += 6;
     }
 }
-// Initialize CPU registers
-static void setup_cpu(uint16_t stack, uint16_t init_pc, uint8_t hi_reg, uint8_t lo_reg) {
-    Z80Reset(&cpu);
-    cpu.pc = init_pc;
-    cpu.registers.word[Z80_SP] = stack;
 
-    cpu.im = 2;
-    cpu.i = 3;
-    cpu.r = 0;
+// Initialize CPU registers
+static void setup_cpu(uint16_t stack, uint8_t hi_reg, uint8_t lo_reg) {
+    Z80Reset(&cpu);
+ 
+    cpu.pc = 0x000;
+    cpu.i = 0x003;
+    cpu.registers.word[Z80_SP] = stack;
 
     cpu.registers.byte[Z80_A] = hi_reg;
     cpu.registers.byte[Z80_F] = lo_reg;
@@ -138,41 +188,42 @@ static void setup_cpu(uint16_t stack, uint16_t init_pc, uint8_t hi_reg, uint8_t 
     cpu.iff2 = 0;
 }
 
-// Run emulation
 static const unsigned char intz[] = {
-    0xf3,       /* di */
-    0xcd, 0x00, 0x00, /* call init */
-    0xed, 0x5e, /* loop: im 2 */
-    0xfb,       /* ei */
-    0x76,       /* halt */
-    0x18, 0xfa  /* jr loop */
+    0xf3,       // di
+    0xcd,0,0,   // call init (addr to be patched)
+    0xed,0x5e,  // loop: im 2
+    0xfb,       // ei
+    0x76,       // halt
+    0x18,0xfa   // jr loop (relative jump)
 };
 
 static const unsigned char intnz[] = {
-    0xf3,       /* di */
-    0xcd, 0x00, 0x00, /* call init */
-    0xed, 0x56, /* loop: im 1 */
-    0xfb,       /* ei */
-    0x76,       /* halt */
-    0xcd, 0x00, 0x00, /* call interrupt */
-    0x18, 0xf7  /* jr loop */
+    0xf3,       // di
+    0xcd,0,0,   // call init (addr to be patched)
+    0xed,0x56,  // loop: im 1
+    0xfb,       // ei
+    0x76,       // halt
+    0xcd,0,0,   // call interrupt (addr to be patched)
+    0x18,0xf7   // jr loop (relative jump)
 };
 
 static void setup_interrupt_handler(uint8_t* memory, uint16_t init_addr, uint16_t interrupt_addr) {
     if (interrupt_addr == 0) {
-        memcpy(memory, intz, sizeof(intz));
-        // Patch the call init address (bytes 2 and 3)
+        // Use intz handler (no interrupt call)
+        memcpy(&memory[0], intz, sizeof(intz));
+        // Patch call init address at intz[2] and intz[3]
         memory[2] = init_addr & 0xFF;
         memory[3] = (init_addr >> 8) & 0xFF;
     }
     else {
-        memcpy(memory, intnz, sizeof(intnz));
-        // Patch the call init address (bytes 2 and 3)
+        // Use intnz handler (with interrupt call)
+        memcpy(&memory[0], intnz, sizeof(intnz));
+        // Patch call init address at intnz[2] and intnz[3]
         memory[2] = init_addr & 0xFF;
         memory[3] = (init_addr >> 8) & 0xFF;
-        // Patch the call interrupt address (bytes 11 and 12)
-        memory[11] = interrupt_addr & 0xFF;
-        memory[12] = (interrupt_addr >> 8) & 0xFF;
+        // Patch call interrupt address at intnz[9] and intnz[10]
+        memory[9] = interrupt_addr & 0xFF;
+        memory[10] = (interrupt_addr >> 8) & 0xFF;
     }
 }
 
@@ -182,35 +233,24 @@ static void emulate_song(uint16_t stack, uint16_t init, uint16_t song_length, ui
     ctx.ay_reg_select = 0;
     ctx.is_done = 0;
 
-    // Clear RAM regions except where song code resides (0xC000+)
-    memset(ctx.memory + 0x0000, 0xC9, 0x0100);     // Trap stray jumps to 0x0000-0x00FF
-    memset(ctx.memory + 0x0100, 0xFF, 0x3F00);    // Fill 0x0100-0x3FFF with 0xFF (NOP or RST 38)
-    memset(ctx.memory + 0x4000, 0x00, 0x8000);    // Clear RAM 0x4000-0xBFFF
-    // Leave 0xC000-0xFFFF untouched — assumes loader has loaded code here!
-
-    // Set up interrupt handler at 0x0000 according to interrupt_addr presence
+    // Install interrupt handler/player stub
     setup_interrupt_handler(ctx.memory, init, interrupt_addr);
 
-    printf("Setting up CPU: stack=0x%04X init=0x%04X hi_reg=0x%02X lo_reg=0x%02X interrupt=0x%04X\n", stack, init, hi_reg, lo_reg, interrupt_addr);
-    setup_cpu(stack, init, hi_reg, lo_reg);
+    // Log config
+    printf("Setting up CPU: stack=0x%04X init=0x0000 hi_reg=0x%02X lo_reg=0x%02X interrupt=0x%04X\n", stack, hi_reg, lo_reg, interrupt_addr);
 
-    // Store init address at 0x0002/0x0003 (used by interrupt handler call)
-    ctx.memory[0x0002] = (init) & 0xFF;
-    ctx.memory[0x0003] = (init >> 8) & 0xFF;
-
-    // Set interrupt flip-flops and mode
-    cpu.iff1 = 1;
-    cpu.iff2 = 1;
-    cpu.im = 2;
+    // Setup CPU regs, flags, IM 0, I = 3
+    setup_cpu(stack, hi_reg, lo_reg);
 
     // Calculate total number of T-states for the song + fade length
     const uint64_t cpu_clock = 3500000ULL;
     const uint64_t int_tstates = cpu_clock / 50; // 50Hz interrupt rate
     uint64_t total_cycles = (uint64_t)(song_length + fade_length) * int_tstates;
 
-    printf("Starting emulation for %llu cycles (~%.2fs)...\n",
+    printf("Starting emulation for %llu cycles (~%.2fs)...\n\n",
         total_cycles, (double)total_cycles / cpu_clock);
 
+    // Emulation loop
     uint64_t cycles = 0;
     uint64_t next_frame = int_tstates;
     const int step_cycles = 100;
@@ -222,8 +262,10 @@ static void emulate_song(uint16_t stack, uint16_t init, uint16_t song_length, ui
         cycles += elapsed;
 
         if (cycles >= next_frame) {
-            Z80Interrupt(&cpu, 0, &ctx);
-
+            if (cpu.iff1 == 1) {
+                Z80Interrupt(&cpu, 0, &ctx);
+            }
+            
             printf("[%05d]", frame_number);
             for (int i = 0; i < 16; i++)
                 printf(" [%02X]=0x%02X", i, ctx.ay_regs[i]);
@@ -250,8 +292,15 @@ void parse_points_data_and_emulate(const uint8_t* file, size_t size, size_t p_po
 
     printf("\tPoints: stack=0x%04X init=0x%04X interrupt=0x%04X\n", stack, init, interrupt);
 
-    load_blocks(file, size, p_addresses_offset);
+    // Clear memory regions according to spec:
+    memset(ctx.memory + 0x0000, 0xC9, 0x0100);     // 0x0000-0x00FF with 0xC9 (RET)
+    memset(ctx.memory + 0x0100, 0xFF, 0x3F00);    // 0x0100-0x3FFF with 0xFF (RST 38h)
+    memset(ctx.memory + 0x4000, 0x00, 0xC000);    // 0x4000-0xFFFF with 0x00
 
+    // Set 0xFB (EI) at 0x0038 as required by spec
+    ctx.memory[0x0038] = 0xFB;
+
+    load_blocks(file, size, p_addresses_offset);
     emulate_song(stack, init, song_length, fade_length, hi_reg, lo_reg, interrupt);
 }
 
