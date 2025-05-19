@@ -14,7 +14,7 @@ static Z80_STATE cpu;
 void SystemCall(AY2YM* ctx) {
     uint16_t pc = cpu.pc;
     uint8_t a = cpu.registers.byte[Z80_A];
-    printf("SystemCall at PC=0x%04X, A=0x%02X\n", pc, a);
+    //printf("SystemCall at PC=0x%04X, A=0x%02X\n", pc, a);
 
     if (pc == 0xFFFF) {
         ctx->is_done = 1;
@@ -96,6 +96,32 @@ size_t resolve_rel_pointer(const uint8_t* file, size_t size, size_t pointer_pos)
 const char* read_ntstring(const uint8_t* file, size_t size, size_t offset) {
     if (offset >= size) return "(invalid)";
     return (const char*)(file + offset);
+}
+
+// Returns 0 on success, -1 on allocation failure
+int append_bytes(
+    unsigned char** p_data, size_t* p_size, size_t* p_capacity,
+    const void* src, size_t length, FILE* file_to_close_on_fail)
+{
+    if (*p_size + length > *p_capacity) {
+        size_t new_capacity = (*p_capacity) * 2;
+        if (new_capacity < *p_size + length)
+            new_capacity = *p_size + length;
+        unsigned char* new_data = (unsigned char*)realloc(*p_data, new_capacity);
+        if (!new_data) {
+            free(*p_data);
+            if (file_to_close_on_fail) fclose(file_to_close_on_fail);
+            *p_data = nullptr;
+            *p_capacity = 0;
+            *p_size = 0;
+            return -1;
+        }
+        *p_data = new_data;
+        *p_capacity = new_capacity;
+    }
+    memcpy(*p_data + *p_size, src, length);
+    *p_size += length;
+    return 0;
 }
 
 char* create_filename_from_song(const char* input_name, const char* song_name) {
@@ -313,64 +339,102 @@ static void emulate_song(
         return;
     }
 
-#define APPEND_BYTES(data_ptr, length) do { \
-    if (ym_size + (length) > ym_capacity) { \
-        size_t new_capacity = ym_capacity * 2; \
-        unsigned char* new_data = (unsigned char*)realloc(ym_data, new_capacity); \
-        if (!new_data) { free(ym_data); fclose(ym_file); return; } \
-        ym_data = new_data; ym_capacity = new_capacity; \
-    } \
-    memcpy(ym_data + ym_size, (data_ptr), (length)); \
-    ym_size += (length); \
-} while (0)
-
     unsigned char packed[4];
 
     // Write YM6 file ID and check string
-    APPEND_BYTES("YM6!", 4);           // Offset 0x00: 4 bytes ID
-    APPEND_BYTES("LeOnArD!", 8);       // Offset 0x04: 8 bytes check string
+    if (append_bytes(&ym_data, &ym_size, &ym_capacity, "YM6!", 4, ym_file) != 0) {
+        free(ym_data);
+        fclose(ym_file);
+        return;
+    }
+
+    if (append_bytes(&ym_data, &ym_size, &ym_capacity, "LeOnArD!", 8, ym_file) != 0) {
+        free(ym_data);
+        fclose(ym_file);
+        return;
+    }
 
     // Number of frames (valid VBLs)
-    long frame_count_offset = ym_size;
+    size_t frame_count_offset = ym_size;
     pack_uint32_be(0, packed);
-    APPEND_BYTES(packed, 4);
+    if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 4, ym_file) != 0) {
+        free(ym_data);
+        fclose(ym_file);
+        return;
+    }
 
     // Song attributes: 0x00 (non-interleaved) | 0x08 (AY-3-8910 compatible)
     uint32_t song_attributes = 0x08;
     pack_uint32_be(song_attributes, packed);
-    APPEND_BYTES(packed, 4);
+    if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 4, ym_file) != 0) {
+        free(ym_data);
+        fclose(ym_file);
+        return;
+    }
 
     // Number of digidrums
     pack_uint32_be(0, packed);
-    APPEND_BYTES(packed, 2);
+    if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 2, ym_file) != 0) {
+        free(ym_data);
+        fclose(ym_file);
+        return;
+    }
 
     // Master clock
     pack_uint32_be(YM_CLOCK, packed);
-    APPEND_BYTES(packed, 4);
+    if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 4, ym_file) != 0) {
+        free(ym_data);
+        fclose(ym_file);
+        return;
+    }
 
     // Player frequency
     pack_uint16_be(FRAME_RATE, packed);
-    APPEND_BYTES(packed, 2);
+    if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 2, ym_file) != 0) {
+        free(ym_data);
+        fclose(ym_file);
+        return;
+    }
 
     // VBL number to loop song
     pack_uint32_be(0, packed);
-    APPEND_BYTES(packed, 4);
+    if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 4, ym_file) != 0) {
+        free(ym_data);
+        fclose(ym_file);
+        return;
+    }
 
     // Additional data size (0)
     pack_uint16_be(0, packed);
-    APPEND_BYTES(packed, 2);
+    if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 2, ym_file) != 0) {
+        free(ym_data);
+        fclose(ym_file);
+        return;
+    }
 
     // Append song name + null terminator
-    APPEND_BYTES(song_name, strlen(song_name));
+    if (append_bytes(&ym_data, &ym_size, &ym_capacity, song_name, strlen(song_name), ym_file) != 0) {
+        free(ym_data);
+        fclose(ym_file);
+        return;
+    }
     ym_data[ym_size++] = 0;    
 
     // Append author + null terminator
-    APPEND_BYTES(author, strlen(author));
+    if (append_bytes(&ym_data, &ym_size, &ym_capacity, author, strlen(author), ym_file) != 0) {
+        free(ym_data);
+        fclose(ym_file);
+        return;
+    }
     ym_data[ym_size++] = 0;
 
     // Append comment + null terminator
     const char* comment = "Converted by Negative Charge(@negativecharge.bsky.social)";
-    APPEND_BYTES(comment, strlen(comment));
+    if (append_bytes(&ym_data, &ym_size, &ym_capacity, comment, strlen(comment), ym_file) != 0) {
+        free(ym_data);
+        fclose(ym_file);
+        return;
+    }
     ym_data[ym_size++] = 0;
 
     // Emulation tone data buffer
@@ -414,10 +478,18 @@ static void emulate_song(
     }
 
     // Append all tone data collected immediately after comment string
-    APPEND_BYTES(tone_data, tone_size);
+    if (append_bytes(&ym_data, &ym_size, &ym_capacity, tone_data, tone_size, ym_file) != 0) {
+        free(ym_data);
+        fclose(ym_file);
+        return;
+    }
 
     // Append YM file terminator
-    APPEND_BYTES("End!", 4);
+    if (append_bytes(&ym_data, &ym_size, &ym_capacity, "End!", 4, ym_file) != 0) {
+        free(ym_data);
+        fclose(ym_file);
+        return;
+    }
 
     // Patch final frame count into ym_data at the stored offset BEFORE writing file
     pack_uint32_be(frame_number, packed);
@@ -431,10 +503,9 @@ static void emulate_song(
     free(ym_data);
     free(tone_data);
 
-#undef APPEND_BYTES
-
     printf("Emulation ended after %d frames, %llu cycles.\n", frame_number, cycles);
 }
+
 // Parse points data and emulate
 void parse_points_data_and_emulate(const uint8_t* file, size_t size, size_t p_points_offset, size_t p_addresses_offset, uint8_t hi_reg, uint8_t lo_reg, uint16_t song_length, uint16_t fade_length) {
     if (p_points_offset == SIZE_MAX || p_points_offset + 6 > size) {
@@ -489,6 +560,40 @@ void parse_song_data(const uint8_t* file, size_t size, size_t song_data_offset) 
     printf("\tfade_length=%d (%.2fs)\n", fade_length, fade_length / 50.0);
     printf("\thi_reg=0x%02X lo_reg=0x%02X\n", hi_reg, lo_reg);
     printf("\tp_points=0x%zX p_addresses=0x%zX\n", p_points, p_addresses);
+
+    // Derive song length if missing
+    if (song_length == 0) {
+        printf("\tNo song length provided - attempting to count addresses at p_addresses\n");
+        if (p_addresses != SIZE_MAX) {
+            size_t count = 0;
+            while (p_addresses + (count * 2) + 1 < size) {
+                uint16_t addr = read_be16u(file + p_addresses + (count * 2));
+                if (addr == 0x0000) break;
+                count++;
+                if (count > 15000) {  // sanity check: never let it run forever
+                    printf("\tAddress table too long - aborting at 15000 frames.\n");
+                    break;
+                }
+            }
+            if (count >= 100) {  // if enough addresses to be a reasonable song
+                if (count > UINT16_MAX) {
+                   printf("\tWarning: count exceeds uint16_t range, truncating to UINT16_MAX.\n");
+                   song_length = UINT16_MAX;
+                } else {
+                   song_length = static_cast<uint16_t>(count);
+                }
+                printf("\tDerived song_length=%zu (%.2fs)\n", count, count / 50.0);
+            }
+            else {
+                printf("\tToo few addresses (%zu) - defaulting to 5 minutes (15000 frames)\n", count);
+                song_length = 15000;
+            }
+        }
+        else {
+            printf("\tp_addresses invalid - defaulting to 5 minutes (15000 frames)\n");
+            song_length = 15000;
+        }
+    }
 
     parse_points_data_and_emulate(file, size, p_points, p_addresses, hi_reg, lo_reg, song_length, fade_length);
 }
