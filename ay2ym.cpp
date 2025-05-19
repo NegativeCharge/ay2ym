@@ -418,8 +418,8 @@ static void emulate_song(
         return;
     }
 
-    // Song attributes: 0x00 (non-interleaved) | 0x08 (AY-3-8910 compatible)
-    uint32_t song_attributes = 0x08;
+    // Song attributes: interleaved (0x01) | AY compatible (0x08) = 0x09
+    uint32_t song_attributes = 0x09;
     pack_uint32_be(song_attributes, packed);
     if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 4, ym_file) != 0) {
         free(ym_data);
@@ -427,7 +427,7 @@ static void emulate_song(
         return;
     }
 
-    // Number of digidrums
+    // Number of digidrums (2 bytes)
     pack_uint32_be(0, packed);
     if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 2, ym_file) != 0) {
         free(ym_data);
@@ -435,7 +435,7 @@ static void emulate_song(
         return;
     }
 
-    // Master clock
+    // Master clock (4 bytes)
     pack_uint32_be(YM_CLOCK, packed);
     if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 4, ym_file) != 0) {
         free(ym_data);
@@ -443,7 +443,7 @@ static void emulate_song(
         return;
     }
 
-    // Player frequency
+    // Player frequency (2 bytes)
     pack_uint16_be(FRAME_RATE, packed);
     if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 2, ym_file) != 0) {
         free(ym_data);
@@ -451,7 +451,7 @@ static void emulate_song(
         return;
     }
 
-    // VBL number to loop song
+    // VBL number to loop song (4 bytes)
     pack_uint32_be(0, packed);
     if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 4, ym_file) != 0) {
         free(ym_data);
@@ -459,7 +459,7 @@ static void emulate_song(
         return;
     }
 
-    // Additional data size (0)
+    // Additional data size (2 bytes)
     pack_uint16_be(0, packed);
     if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 2, ym_file) != 0) {
         free(ym_data);
@@ -473,7 +473,7 @@ static void emulate_song(
         fclose(ym_file);
         return;
     }
-    ym_data[ym_size++] = 0;    
+    ym_data[ym_size++] = 0;
 
     // Append author + null terminator
     if (append_bytes(&ym_data, &ym_size, &ym_capacity, author, strlen(author), ym_file) != 0) {
@@ -532,17 +532,72 @@ static void emulate_song(
         }
     }
 
-    // Append all tone data collected immediately after comment string
-    if (append_bytes(&ym_data, &ym_size, &ym_capacity, tone_data, tone_size, ym_file) != 0) {
-        free(ym_data);
+    // Trim trailing zero frames that contain all 16 zero registers
+    int zero_frame_count = 0;
+    for (int i = frame_number - 1; i >= 0; i--) {
+        int all_zero = 1;
+        for (int reg = 0; reg < 16; reg++) {
+            if (tone_data[i * 16 + reg] != 0) {
+                all_zero = 0;
+                break;
+            }
+        }
+        if (all_zero) zero_frame_count++;
+        else break;
+    }
+
+    if (zero_frame_count > 0) {
+        frame_number -= zero_frame_count;
+        tone_size = frame_number * 16;
+        printf("Trimmed %d trailing zero frames from output.\n", zero_frame_count);
+    }
+    else {
+        printf("No trailing zero frames to trim.\n");
+    }
+
+    // If no frames remain after trimming, delete file and return
+    if (frame_number == 0) {
+        printf("No non-zero frames remain after trimming; deleting output file.\n");
         fclose(ym_file);
+        free(ym_data);
+        free(tone_data);
+        if (remove(output_file) != 0) {
+            printf("Warning: Failed to delete output file '%s'\n", output_file);
+        }
         return;
     }
+
+    // Interleave frames: all reg0 for all frames, then all reg1, etc.
+    unsigned char* interleaved_data = (unsigned char*)malloc(tone_size);
+    if (!interleaved_data) {
+        printf("Failed to allocate memory for interleaved tone data.\n");
+        free(ym_data);
+        fclose(ym_file);
+        free(tone_data);
+        return;
+    }
+
+    for (int reg = 0; reg < 16; reg++) {
+        for (int frm = 0; frm < frame_number; frm++) {
+            interleaved_data[reg * frame_number + frm] = tone_data[frm * 16 + reg];
+        }
+    }
+
+    // Append interleaved tone data
+    if (append_bytes(&ym_data, &ym_size, &ym_capacity, interleaved_data, tone_size, ym_file) != 0) {
+        free(interleaved_data);
+        free(ym_data);
+        fclose(ym_file);
+        free(tone_data);
+        return;
+    }
+    free(interleaved_data);
 
     // Append YM file terminator
     if (append_bytes(&ym_data, &ym_size, &ym_capacity, "End!", 4, ym_file) != 0) {
         free(ym_data);
         fclose(ym_file);
+        free(tone_data);
         return;
     }
 
