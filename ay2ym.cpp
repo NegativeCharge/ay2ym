@@ -124,12 +124,13 @@ int append_bytes(
     return 0;
 }
 
-// Function to sanitize a string for Windows filenames
-void sanitize_filename(const char* src, char* dest, size_t max_len) {
+// Sanitize a filename component by replacing invalid Windows chars with '_'
+void sanitize_filename_part(const char* src, char* dest, size_t max_len) {
     const char* invalid_chars = "<>:\"/\\|?*";
     size_t i, j = 0;
     for (i = 0; src[i] != '\0' && j < max_len - 1; i++) {
         char c = src[i];
+        // Replace invalid chars or control chars with underscore
         if ((unsigned char)c < 32 || strchr(invalid_chars, c)) {
             dest[j++] = '_';
         }
@@ -143,34 +144,53 @@ void sanitize_filename(const char* src, char* dest, size_t max_len) {
 char* create_filename_from_song(const char* input_name, const char* song_name) {
     if (!input_name || !song_name) return NULL;
 
-    size_t input_len = strlen(input_name);
+    // Find last path separator (either / or \)
+    const char* last_slash1 = strrchr(input_name, '/');
+    const char* last_slash2 = strrchr(input_name, '\\');
+    const char* last_slash = last_slash1 > last_slash2 ? last_slash1 : last_slash2;
+
+    size_t path_len = 0;
+    if (last_slash) {
+        path_len = (size_t)(last_slash - input_name) + 1;  // include the slash
+    }
+
+    // Extract original filename part
+    const char* original_filename = last_slash ? last_slash + 1 : input_name;
+
+    // Sanitize filename part
+    size_t filename_len = strlen(original_filename);
+    char* safe_filename = (char*)malloc(filename_len + 1);
+    if (!safe_filename) return NULL;
+    sanitize_filename_part(original_filename, safe_filename, filename_len + 1);
+
+    // Sanitize song_name too
     size_t song_len = strlen(song_name);
-
-    // Temporary buffers for sanitized names
-    char* safe_input = (char*)malloc(input_len + 1);
     char* safe_song = (char*)malloc(song_len + 1);
-    if (!safe_input || !safe_song) {
-        free(safe_input);
-        free(safe_song);
+    if (!safe_song) {
+        free(safe_filename);
         return NULL;
     }
+    sanitize_filename_part(song_name, safe_song, song_len + 1);
 
-    sanitize_filename(input_name, safe_input, input_len + 1);
-    sanitize_filename(song_name, safe_song, song_len + 1);
+    // Construct final string: [path][safe_filename] - [safe_song].ym
+    // Calculate length: path + sanitized filename + " - " + sanitized song + ".ym" + '\0'
+    size_t total_len = path_len + strlen(safe_filename) + 3 + strlen(safe_song) + 3 + 1;
 
-    // Calculate required buffer size: input + " - " + song + ".ym" + null terminator
-    size_t len = strlen(safe_input) + 3 + strlen(safe_song) + 3 + 1;
-
-    char* filename = (char*)malloc(len);
+    char* filename = (char*)malloc(total_len);
     if (!filename) {
-        free(safe_input);
+        free(safe_filename);
         free(safe_song);
         return NULL;
     }
 
-    snprintf(filename, len, "%s - %s.ym", safe_input, safe_song);
+    // Copy path part if any
+    if (path_len > 0) {
+        memcpy(filename, input_name, path_len);
+    }
+    // Format filename and song part
+    snprintf(filename + path_len, total_len - path_len, "%s - %s.ym", safe_filename, safe_song);
 
-    free(safe_input);
+    free(safe_filename);
     free(safe_song);
 
     return filename;
