@@ -124,19 +124,54 @@ int append_bytes(
     return 0;
 }
 
+// Function to sanitize a string for Windows filenames
+void sanitize_filename(const char* src, char* dest, size_t max_len) {
+    const char* invalid_chars = "<>:\"/\\|?*";
+    size_t i, j = 0;
+    for (i = 0; src[i] != '\0' && j < max_len - 1; i++) {
+        char c = src[i];
+        if ((unsigned char)c < 32 || strchr(invalid_chars, c)) {
+            dest[j++] = '_';
+        }
+        else {
+            dest[j++] = c;
+        }
+    }
+    dest[j] = '\0';
+}
+
 char* create_filename_from_song(const char* input_name, const char* song_name) {
-    // Validate input strings
     if (!input_name || !song_name) return NULL;
 
+    size_t input_len = strlen(input_name);
+    size_t song_len = strlen(song_name);
+
+    // Temporary buffers for sanitized names
+    char* safe_input = (char*)malloc(input_len + 1);
+    char* safe_song = (char*)malloc(song_len + 1);
+    if (!safe_input || !safe_song) {
+        free(safe_input);
+        free(safe_song);
+        return NULL;
+    }
+
+    sanitize_filename(input_name, safe_input, input_len + 1);
+    sanitize_filename(song_name, safe_song, song_len + 1);
+
     // Calculate required buffer size: input + " - " + song + ".ym" + null terminator
-    size_t len = strlen(input_name) + 3 + strlen(song_name) + 3 + 1; // 3 for " - ", 3 for ".ym", 1 for '\0'
+    size_t len = strlen(safe_input) + 3 + strlen(safe_song) + 3 + 1;
 
-    // Allocate memory for the new filename string
     char* filename = (char*)malloc(len);
-    if (!filename) return NULL;
+    if (!filename) {
+        free(safe_input);
+        free(safe_song);
+        return NULL;
+    }
 
-    // Format the final string safely
-    snprintf(filename, len, "%s - %s.ym", input_name, song_name);
+    snprintf(filename, len, "%s - %s.ym", safe_input, safe_song);
+
+    free(safe_input);
+    free(safe_song);
 
     return filename;
 }
