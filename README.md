@@ -42,6 +42,23 @@ ay2ym.exe input_file.ay
 - The tool is designed for batch conversion and may not handle all edge cases of malformed AY files (in particular, no handling of beeper tunes).
 - Output files are sanitized to avoid invalid filename characters on Windows.
 
+## Example of Batch Conversion on Windows
+
+```batch
+@echo off
+chcp 65001 >nul
+cls
+for /f "tokens=* delims=" %%a in ('dir "tracks\*.ay" /s /b') do (
+	echo "Converting %%a..."
+	ay2ym.exe "%%a"
+)
+
+echo "Conversion complete."
+pause
+```
+
+This batch script will convert all AY files in the `tracks` directory and its subdirectories, creating corresponding YM files in the same location.
+
 ## License
 
 This project is licensed the same as the original Z80EMU project. This code is free, do whatever you want with it.
