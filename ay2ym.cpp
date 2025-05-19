@@ -397,102 +397,49 @@ static void emulate_song(
     unsigned char packed[4];
 
     // Write YM6 file ID and check string
-    if (append_bytes(&ym_data, &ym_size, &ym_capacity, "YM6!", 4, ym_file) != 0) {
-        free(ym_data);
-        fclose(ym_file);
-        return;
-    }
+    append_bytes(&ym_data, &ym_size, &ym_capacity, "YM6!", 4, ym_file);
+    append_bytes(&ym_data, &ym_size, &ym_capacity, "LeOnArD!", 8, ym_file);
 
-    if (append_bytes(&ym_data, &ym_size, &ym_capacity, "LeOnArD!", 8, ym_file) != 0) {
-        free(ym_data);
-        fclose(ym_file);
-        return;
-    }
-
-    // Number of frames (valid VBLs)
+    // Number of frames placeholder
     size_t frame_count_offset = ym_size;
     pack_uint32_be(0, packed);
-    if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 4, ym_file) != 0) {
-        free(ym_data);
-        fclose(ym_file);
-        return;
-    }
+    append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 4, ym_file);
 
-    // Song attributes: interleaved (0x01) | AY compatible (0x08) = 0x09
+    // Song attributes: 0x09 (interleaved | AY-compatible)
     uint32_t song_attributes = 0x09;
     pack_uint32_be(song_attributes, packed);
-    if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 4, ym_file) != 0) {
-        free(ym_data);
-        fclose(ym_file);
-        return;
-    }
+    append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 4, ym_file);
 
-    // Number of digidrums (2 bytes)
+    // Number of digidrums
     pack_uint32_be(0, packed);
-    if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 2, ym_file) != 0) {
-        free(ym_data);
-        fclose(ym_file);
-        return;
-    }
+    append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 2, ym_file);
 
-    // Master clock (4 bytes)
+    // Master clock
     pack_uint32_be(YM_CLOCK, packed);
-    if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 4, ym_file) != 0) {
-        free(ym_data);
-        fclose(ym_file);
-        return;
-    }
+    append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 4, ym_file);
 
-    // Player frequency (2 bytes)
+    // Player frequency
     pack_uint16_be(FRAME_RATE, packed);
-    if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 2, ym_file) != 0) {
-        free(ym_data);
-        fclose(ym_file);
-        return;
-    }
+    append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 2, ym_file);
 
-    // VBL number to loop song (4 bytes)
+    // VBL loop position
     pack_uint32_be(0, packed);
-    if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 4, ym_file) != 0) {
-        free(ym_data);
-        fclose(ym_file);
-        return;
-    }
+    append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 4, ym_file);
 
-    // Additional data size (2 bytes)
+    // Additional data size
     pack_uint16_be(0, packed);
-    if (append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 2, ym_file) != 0) {
-        free(ym_data);
-        fclose(ym_file);
-        return;
-    }
+    append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 2, ym_file);
 
-    // Append song name + null terminator
-    if (append_bytes(&ym_data, &ym_size, &ym_capacity, song_name, strlen(song_name), ym_file) != 0) {
-        free(ym_data);
-        fclose(ym_file);
-        return;
-    }
+    // Song name, author, comment
+    append_bytes(&ym_data, &ym_size, &ym_capacity, song_name, strlen(song_name), ym_file);
     ym_data[ym_size++] = 0;
-
-    // Append author + null terminator
-    if (append_bytes(&ym_data, &ym_size, &ym_capacity, author, strlen(author), ym_file) != 0) {
-        free(ym_data);
-        fclose(ym_file);
-        return;
-    }
+    append_bytes(&ym_data, &ym_size, &ym_capacity, author, strlen(author), ym_file);
     ym_data[ym_size++] = 0;
-
-    // Append comment + null terminator
     const char* comment = "Converted by Negative Charge(@negativecharge.bsky.social)";
-    if (append_bytes(&ym_data, &ym_size, &ym_capacity, comment, strlen(comment), ym_file) != 0) {
-        free(ym_data);
-        fclose(ym_file);
-        return;
-    }
+    append_bytes(&ym_data, &ym_size, &ym_capacity, comment, strlen(comment), ym_file);
     ym_data[ym_size++] = 0;
 
-    // Emulation tone data buffer
+    // Tone data buffer
     size_t tone_capacity = 1024;
     size_t tone_size = 0;
     unsigned char* tone_data = (unsigned char*)malloc(tone_capacity);
@@ -501,8 +448,9 @@ static void emulate_song(
         fclose(ym_file);
         return;
     }
-    memset(tone_data, 0, tone_capacity);  // Zero tone buffer for safety
+    memset(tone_data, 0, tone_capacity);
 
+    // Emulation loop
     while (cycles < total_cycles && !ctx.is_done) {
         int elapsed = Z80Emulate(&cpu, step_cycles, &ctx);
         if (elapsed <= 0) break;
@@ -532,7 +480,19 @@ static void emulate_song(
         }
     }
 
-    // Trim trailing zero frames that contain all 16 zero registers
+    // If no frames were generated, delete and exit
+    if (frame_number == 0) {
+        printf("No frames generated during emulation; deleting output file.\n");
+        fclose(ym_file);
+        free(ym_data);
+        free(tone_data);
+        if (remove(output_file) != 0) {
+            printf("Warning: Failed to delete output file '%s'\n", output_file);
+        }
+        return;
+    }
+
+    // Trim trailing zero frames
     int zero_frame_count = 0;
     for (int i = frame_number - 1; i >= 0; i--) {
         int all_zero = 1;
@@ -555,7 +515,7 @@ static void emulate_song(
         printf("No trailing zero frames to trim.\n");
     }
 
-    // If no frames remain after trimming, delete file and return
+    // If no frames remain after trimming, delete and exit
     if (frame_number == 0) {
         printf("No non-zero frames remain after trimming; deleting output file.\n");
         fclose(ym_file);
@@ -567,51 +527,40 @@ static void emulate_song(
         return;
     }
 
-    // Interleave frames: all reg0 for all frames, then all reg1, etc.
-    unsigned char* interleaved_data = (unsigned char*)malloc(tone_size);
+    // Interleave tone data
+    size_t interleaved_size = frame_number * 16;
+    unsigned char* interleaved_data = (unsigned char*)malloc(interleaved_size);
     if (!interleaved_data) {
-        printf("Failed to allocate memory for interleaved tone data.\n");
+        free(tone_data);
         free(ym_data);
         fclose(ym_file);
-        free(tone_data);
         return;
     }
 
     for (int reg = 0; reg < 16; reg++) {
-        for (int frm = 0; frm < frame_number; frm++) {
-            interleaved_data[reg * frame_number + frm] = tone_data[frm * 16 + reg];
+        for (int f = 0; f < frame_number; f++) {
+            interleaved_data[reg * frame_number + f] = tone_data[f * 16 + reg];
         }
     }
 
-    // Append interleaved tone data
-    if (append_bytes(&ym_data, &ym_size, &ym_capacity, interleaved_data, tone_size, ym_file) != 0) {
-        free(interleaved_data);
-        free(ym_data);
-        fclose(ym_file);
-        free(tone_data);
-        return;
-    }
-    free(interleaved_data);
+    // Append interleaved data
+    append_bytes(&ym_data, &ym_size, &ym_capacity, interleaved_data, interleaved_size, ym_file);
 
-    // Append YM file terminator
-    if (append_bytes(&ym_data, &ym_size, &ym_capacity, "End!", 4, ym_file) != 0) {
-        free(ym_data);
-        fclose(ym_file);
-        free(tone_data);
-        return;
-    }
+    // Append terminator
+    append_bytes(&ym_data, &ym_size, &ym_capacity, "End!", 4, ym_file);
 
-    // Patch final frame count into ym_data at the stored offset BEFORE writing file
+    // Patch final frame count
     pack_uint32_be(frame_number, packed);
     memcpy(ym_data + frame_count_offset, packed, 4);
 
-    // Write entire buffer from start
+    // Write file
     fseek(ym_file, 0, SEEK_SET);
     fwrite(ym_data, 1, ym_size, ym_file);
 
     fclose(ym_file);
     free(ym_data);
     free(tone_data);
+    free(interleaved_data);
 
     printf("Emulation ended after %d frames, %llu cycles.\n", frame_number, cycles);
 }
