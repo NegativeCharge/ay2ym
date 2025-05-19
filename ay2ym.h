@@ -1,16 +1,23 @@
 /* ay2ym.h
  * Header for AY to YM emulator context.
- *
- * Copyright (c) 2025 Your Name
- *
- * This code is free, do whatever you want with it.
- */
+  */
 
 #ifndef __AY2YM_INCLUDED__
 #define __AY2YM_INCLUDED__
 
 #include "z80emu.h"
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifdef _MSC_VER
+#define strdup _strdup
+#endif
+
+#define YM_CLOCK 1773400      // ZX Spectrum Chip Frequency
+#define FRAME_RATE 50
+#define FRAME_COUNT_OFFSET 12
 
  // AY to YM emulator context structure
 typedef struct AY2YM {
@@ -24,6 +31,10 @@ typedef struct AY2YM {
     // Add this:
     uint8_t addr_latch;     // latched AY register index
 } AY2YM;
+
+const char* orig_file_name = NULL;
+const char* song_name = NULL;
+const char* author = NULL;
 
 #ifdef __cplusplus
 extern "C" {

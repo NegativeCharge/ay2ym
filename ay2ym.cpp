@@ -1,9 +1,4 @@
-#define _CRT_SECURE_NO_WARNINGS
-
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+﻿#define _CRT_SECURE_NO_WARNINGS
 
 #include "ay2ym.h"
 #include "z80emu.h"
@@ -66,6 +61,18 @@ void ay2ym_out(void* context, uint16_t port, uint8_t value, uint64_t elapsed_cyc
     ctx->is_done = 0;  // signal that something changed / needs updating
 }
 
+static void pack_uint32_be(uint32_t value, unsigned char* out) {
+    out[0] = (value >> 24) & 0xFF;
+    out[1] = (value >> 16) & 0xFF;
+    out[2] = (value >> 8) & 0xFF;
+    out[3] = value & 0xFF;
+}
+
+static void pack_uint16_be(uint16_t value, unsigned char* out) {
+    out[0] = (value >> 8) & 0xFF;
+    out[1] = value & 0xFF;
+}
+
 // Read signed 16-bit big-endian
 static inline int16_t read_be16s(const uint8_t* ptr) {
     return (int16_t)((ptr[0] << 8) | ptr[1]);
@@ -89,6 +96,43 @@ size_t resolve_rel_pointer(const uint8_t* file, size_t size, size_t pointer_pos)
 const char* read_ntstring(const uint8_t* file, size_t size, size_t offset) {
     if (offset >= size) return "(invalid)";
     return (const char*)(file + offset);
+}
+
+char* create_filename_from_song(const char* input_name, const char* song_name) {
+    // Validate input strings
+    if (!input_name || !song_name) return NULL;
+
+    // Calculate required buffer size: input + " - " + song + ".ym" + null terminator
+    size_t len = strlen(input_name) + 3 + strlen(song_name) + 3 + 1; // 3 for " - ", 3 for ".ym", 1 for '\0'
+
+    // Allocate memory for the new filename string
+    char* filename = (char*)malloc(len);
+    if (!filename) return NULL;
+
+    // Format the final string safely
+    snprintf(filename, len, "%s - %s.ym", input_name, song_name);
+
+    return filename;
+}
+
+char* remove_file_extension(const char* filename) {
+    // Find last '.' in the string
+    const char* dot = strrchr(filename, '.');
+
+    // If no dot found, or it's the first char (hidden files like .bashrc), return full name
+    if (!dot || dot == filename)
+        return strdup(filename);
+
+    // Allocate space for the new string
+    size_t len = dot - filename;
+    char* result = (char*)malloc(len + 1);
+    if (!result) return NULL;
+
+    // Copy the part before the dot
+    strncpy(result, filename, len);
+    result[len] = '\0';
+
+    return result;
 }
 
 static void dump_memory_range(const uint8_t* memory, uint16_t start, uint16_t end) {
@@ -227,34 +271,118 @@ static void setup_interrupt_handler(uint8_t* memory, uint16_t init_addr, uint16_
     }
 }
 
-static void emulate_song(uint16_t stack, uint16_t init, uint16_t song_length, uint16_t fade_length, uint8_t hi_reg, uint8_t lo_reg, uint16_t interrupt_addr) {
-    // Clear AY registers and state variables
+static void emulate_song(
+    uint16_t stack, uint16_t init, uint16_t song_length, uint16_t fade_length,
+    uint8_t hi_reg, uint8_t lo_reg, uint16_t interrupt_addr)
+{
     memset(ctx.ay_regs, 0, sizeof(ctx.ay_regs));
     ctx.ay_reg_select = 0;
     ctx.is_done = 0;
 
-    // Install interrupt handler/player stub
     setup_interrupt_handler(ctx.memory, init, interrupt_addr);
 
-    // Log config
-    printf("Setting up CPU: stack=0x%04X init=0x0000 hi_reg=0x%02X lo_reg=0x%02X interrupt=0x%04X\n", stack, hi_reg, lo_reg, interrupt_addr);
+    printf("Setting up CPU: stack=0x%04X init=0x0000 hi_reg=0x%02X lo_reg=0x%02X interrupt=0x%04X\n",
+        stack, hi_reg, lo_reg, interrupt_addr);
 
-    // Setup CPU regs, flags, IM 0, I = 3
     setup_cpu(stack, hi_reg, lo_reg);
 
-    // Calculate total number of T-states for the song + fade length
     const uint64_t cpu_clock = 3500000ULL;
-    const uint64_t int_tstates = cpu_clock / 50; // 50Hz interrupt rate
+    const uint64_t int_tstates = cpu_clock / FRAME_RATE;
     uint64_t total_cycles = (uint64_t)(song_length + fade_length) * int_tstates;
 
     printf("Starting emulation for %llu cycles (~%.2fs)...\n\n",
         total_cycles, (double)total_cycles / cpu_clock);
 
-    // Emulation loop
     uint64_t cycles = 0;
     uint64_t next_frame = int_tstates;
     const int step_cycles = 100;
     int frame_number = 0;
+
+    char* output_file = create_filename_from_song(orig_file_name, song_name);
+    FILE* ym_file = fopen(output_file, "wb");
+    if (NULL == ym_file) {
+        printf("Can't open output file '%s'\n", output_file);
+        return;
+    }
+
+    size_t ym_capacity = 65536;
+    size_t ym_size = 0;
+    unsigned char* ym_data = (unsigned char*)malloc(ym_capacity);
+    if (!ym_data) {
+        fclose(ym_file);
+        return;
+    }
+
+#define APPEND_BYTES(data_ptr, length) do { \
+    if (ym_size + (length) > ym_capacity) { \
+        size_t new_capacity = ym_capacity * 2; \
+        unsigned char* new_data = (unsigned char*)realloc(ym_data, new_capacity); \
+        if (!new_data) { free(ym_data); fclose(ym_file); return; } \
+        ym_data = new_data; ym_capacity = new_capacity; \
+    } \
+    memcpy(ym_data + ym_size, (data_ptr), (length)); \
+    ym_size += (length); \
+} while (0)
+
+    unsigned char packed[4];
+
+    // Write YM6 file ID and check string
+    APPEND_BYTES("YM6!", 4);           // Offset 0x00: 4 bytes ID
+    APPEND_BYTES("LeOnArD!", 8);       // Offset 0x04: 8 bytes check string
+
+    // Number of frames (valid VBLs)
+    long frame_count_offset = ym_size;
+    pack_uint32_be(0, packed);
+    APPEND_BYTES(packed, 4);
+
+    // Song attributes: 0x00 (non-interleaved) | 0x08 (AY-3-8910 compatible)
+    uint32_t song_attributes = 0x08;
+    pack_uint32_be(song_attributes, packed);
+    APPEND_BYTES(packed, 4);
+
+    // Number of digidrums
+    pack_uint32_be(0, packed);
+    APPEND_BYTES(packed, 2);
+
+    // Master clock
+    pack_uint32_be(YM_CLOCK, packed);
+    APPEND_BYTES(packed, 4);
+
+    // Player frequency
+    pack_uint16_be(FRAME_RATE, packed);
+    APPEND_BYTES(packed, 2);
+
+    // VBL number to loop song
+    pack_uint32_be(0, packed);
+    APPEND_BYTES(packed, 4);
+
+    // Additional data size (0)
+    pack_uint16_be(0, packed);
+    APPEND_BYTES(packed, 2);
+
+    // Append song name + null terminator
+    APPEND_BYTES(song_name, strlen(song_name));
+    ym_data[ym_size++] = 0;    
+
+    // Append author + null terminator
+    APPEND_BYTES(author, strlen(author));
+    ym_data[ym_size++] = 0;
+
+    // Append comment + null terminator
+    const char* comment = "Converted by Negative Charge(@negativecharge.bsky.social)";
+    APPEND_BYTES(comment, strlen(comment));
+    ym_data[ym_size++] = 0;
+
+    // Emulation tone data buffer
+    size_t tone_capacity = 1024;
+    size_t tone_size = 0;
+    unsigned char* tone_data = (unsigned char*)malloc(tone_capacity);
+    if (!tone_data) {
+        free(ym_data);
+        fclose(ym_file);
+        return;
+    }
+    memset(tone_data, 0, tone_capacity);  // Zero tone buffer for safety
 
     while (cycles < total_cycles && !ctx.is_done) {
         int elapsed = Z80Emulate(&cpu, step_cycles, &ctx);
@@ -262,23 +390,51 @@ static void emulate_song(uint16_t stack, uint16_t init, uint16_t song_length, ui
         cycles += elapsed;
 
         if (cycles >= next_frame) {
-            if (cpu.iff1 == 1) {
-                Z80Interrupt(&cpu, 0, &ctx);
+            if (cpu.iff1 == 1) Z80Interrupt(&cpu, 0, &ctx);
+
+            if (tone_size + 16 > tone_capacity) {
+                tone_capacity *= 2;
+                unsigned char* new_tone_data = (unsigned char*)realloc(tone_data, tone_capacity);
+                if (!new_tone_data) {
+                    free(tone_data);
+                    free(ym_data);
+                    fclose(ym_file);
+                    return;
+                }
+                tone_data = new_tone_data;
             }
-            
-            printf("[%05d]", frame_number);
-            for (int i = 0; i < 16; i++)
-                printf(" [%02X]=0x%02X", i, ctx.ay_regs[i]);
-            printf("\n");
+
+            for (int i = 0; i < 16; i++) {
+                tone_data[tone_size++] = ctx.ay_regs[i];
+            }
 
             frame_number++;
             next_frame += int_tstates;
         }
     }
 
+    // Append all tone data collected immediately after comment string
+    APPEND_BYTES(tone_data, tone_size);
+
+    // Append YM file terminator
+    APPEND_BYTES("End!", 4);
+
+    // Patch final frame count into ym_data at the stored offset BEFORE writing file
+    pack_uint32_be(frame_number, packed);
+    memcpy(ym_data + frame_count_offset, packed, 4);
+
+    // Write entire buffer from start
+    fseek(ym_file, 0, SEEK_SET);
+    fwrite(ym_data, 1, ym_size, ym_file);
+
+    fclose(ym_file);
+    free(ym_data);
+    free(tone_data);
+
+#undef APPEND_BYTES
+
     printf("Emulation ended after %d frames, %llu cycles.\n", frame_number, cycles);
 }
-
 // Parse points data and emulate
 void parse_points_data_and_emulate(const uint8_t* file, size_t size, size_t p_points_offset, size_t p_addresses_offset, uint8_t hi_reg, uint8_t lo_reg, uint16_t song_length, uint16_t fade_length) {
     if (p_points_offset == SIZE_MAX || p_points_offset + 6 > size) {
@@ -357,7 +513,7 @@ void parse_song_structure_table(const uint8_t* file, size_t size, size_t table_o
         size_t song_name_ptr = resolve_rel_pointer(file, size, entry_pos);
         size_t song_data_ptr = resolve_rel_pointer(file, size, entry_pos + 2);
 
-        const char* song_name = (song_name_ptr != SIZE_MAX) ? read_ntstring(file, size, song_name_ptr) : "(invalid)";
+        song_name = (song_name_ptr != SIZE_MAX) ? read_ntstring(file, size, song_name_ptr) : "(invalid)";
         printf("\nSong %d: %s\n", i, song_name);
 
         parse_song_data(file, size, song_data_ptr);
@@ -384,8 +540,10 @@ void parse_ay_file(const uint8_t* file, size_t size) {
 
     size_t p_author_abs = (size_t)12 + p_author;
     size_t p_misc_abs = (size_t)14 + p_misc;
-    if (p_author_abs < size)
-        printf("Author: %s\n", read_ntstring(file, size, p_author_abs));
+    if (p_author_abs < size) {
+        author = read_ntstring(file, size, p_author_abs);
+        printf("Author: %s\n", author);
+    }
     else
         printf("Invalid author pointer\n");
 
@@ -406,11 +564,14 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    FILE* f = fopen(argv[1], "rb");
+    int arg = 1;
+    FILE* f = fopen(argv[arg], "rb");
     if (!f) {
         perror("Failed to open input file");
         return 1;
     }
+
+    orig_file_name = remove_file_extension(argv[arg]);
 
     fseek(f, 0, SEEK_END);
     size_t size = ftell(f);
