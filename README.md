@@ -2,15 +2,15 @@
 
 ## Overview
 
-**AY2YM** is a command-line tool that converts AY music files (commonly used for ZX Spectrum and similar systems) into the YM6 format, which is widely supported by modern music players and emulators. The tool emulates a Z80 CPU and AY-3-8910 sound chip to accurately render the music data, then outputs an interleaved YM6 file suitable for playback.
+**AY2YM** is a command-line tool that converts AY music files (commonly used for ZX Spectrum, Amstrad CPC, and similar systems) into the YM6 format, which is widely supported by modern music players and emulators. The tool emulates a Z80 CPU and AY-3-8910/AY-3-8912 sound chip to accurately render the music data, then outputs an interleaved YM6 file suitable for playback.
 
 ## Features
 
-- Emulates Z80 CPU and AY-3-8910 sound chip logic
+- Emulates Z80 CPU and AY-3-8910/AY-3-8912 sound chip logic
 - Supports parsing and conversion of AY files with multiple songs
+- **New:** Supports Amstrad CPC AY port mapping and playback logic
 - Outputs YM6 files with proper metadata, interleaved register data, and trailing silence trimming
 - Handles file and song name sanitization for safe output filenames
-- Written in portable C++14
 
 ## Usage
 
@@ -58,6 +58,16 @@ pause
 ```
 
 This batch script will convert all AY files in the `tracks` directory and its subdirectories, creating corresponding YM files in the same location.
+
+## Version Change Log
+
+### v1.1.0 (2025-05-22)
+- **Added support for Amstrad CPC AY port mapping and playback.**
+- Improved filename sanitization for output files.
+- Minor bug fixes and code cleanup.
+
+### v1.0.0
+- Initial release: ZX Spectrum AY to YM6 conversion, multi-song support, metadata output, and batch conversion.
 
 ## License
 
