@@ -328,7 +328,7 @@ bool is_port_in_list(uint8_t port, const uint8_t* list, size_t count) {
 }
 
 // Main load_blocks and detection function
-void load_blocks(const uint8_t* file, size_t size, size_t p_addresses_offset) {
+void load_blocks(const uint8_t* file, size_t size, uint16_t init, size_t p_addresses_offset) {
     result.detected = MACHINE_UNKNOWN;
     result.spectrum_port_count = 0;
     result.cpc_port_count = 0;
@@ -350,13 +350,11 @@ void load_blocks(const uint8_t* file, size_t size, size_t p_addresses_offset) {
         int16_t offset_rel = read_be16s(file + pos + 4);
         size_t offset_abs = pos + 4 + offset_rel;
 
-        // Clamp length if address + length exceeds memory size
         if ((uint32_t)addr + length > 65536) {
             length = 65536 - addr;
             printf("\tClamped length to 0x%X due to memory size\n", length);
         }
 
-        // Clamp length if offset_abs + length exceeds file size
         if (offset_abs + length > size) {
             length = (size > offset_abs ? size - offset_abs : 0) > UINT16_MAX
                 ? UINT16_MAX
@@ -390,13 +388,11 @@ void load_blocks(const uint8_t* file, size_t size, size_t p_addresses_offset) {
 
                 bool detected = false;
 
-                // ZX Spectrum AY ports are always 0xFDxx
                 if ((port & 0xFF00) == 0xFD00) {
                     result.spectrum_port_count++;
                     printf("\t[DBG] Detected as ZX Spectrum AY port (OUT (C),r)\n");
                     detected = true;
                 }
-                // CPC AY ports are 4MB extension ports with bbb = 0-7, but avoid 0xF0-0xFF for Spectrum
                 else if (port_hi < 0xF0) {
                     uint16_t bbb = (port & 0x0E00) >> 9;
                     if (bbb <= 7) {
@@ -411,7 +407,6 @@ void load_blocks(const uint8_t* file, size_t size, size_t p_addresses_offset) {
                 }
             }
 
-            // OUT (n),A (D3 nn)
             if (opcode == 0xD3) {
                 uint8_t port = ctx.memory[addr + i + 1];
                 printf("\t[DBG] OUT (n),A to 0x%02X at 0x%04lX\n", port, (unsigned long)(addr + i));
@@ -437,21 +432,40 @@ void load_blocks(const uint8_t* file, size_t size, size_t p_addresses_offset) {
                     detected = true;
                 }
 
-                if (!detected)
+                if (!detected) {
                     printf("\t[DBG] OUT (n),A to 0x%02X at 0x%04lX undetected\n", port, (unsigned long)(addr + i));
+                }
             }
         }
 
         pos += 6;
     }
 
-    // Final detection decision
     if (result.spectrum_port_count > result.cpc_port_count) {
         result.detected = MACHINE_ZX_SPECTRUM;
-    } else if (result.cpc_port_count > result.spectrum_port_count) {
+    }
+    else if (result.cpc_port_count > result.spectrum_port_count) {
         result.detected = MACHINE_AMSTRAD_CPC;
-    } else {
-        result.detected = MACHINE_UNKNOWN;
+    }
+    else {
+        // If there's a ZX Spectrum AY port at all, default to Spectrum
+        if (result.spectrum_port_count > 0) {
+            result.detected = MACHINE_ZX_SPECTRUM;
+        }
+        else if (result.cpc_port_count > 0) {
+            result.detected = MACHINE_AMSTRAD_CPC;
+        }
+        else if (init >= 0xC000) {
+            result.detected = MACHINE_ZX_SPECTRUM;
+            printf("[DBG] Heuristic: init address 0x%04X suggests ZX Spectrum\n", init);
+        }
+        else if (init >= 0x8000 && init < 0xC000) {
+            result.detected = MACHINE_AMSTRAD_CPC;
+            printf("[DBG] Heuristic: init address 0x%04X suggests Amstrad CPC\n", init);
+        }
+        else {
+            result.detected = MACHINE_UNKNOWN;
+        }
     }
 
     printf("\nAmstrad CPC AY port count: %d\n", result.cpc_port_count);
@@ -462,12 +476,12 @@ void load_blocks(const uint8_t* file, size_t size, size_t p_addresses_offset) {
         result.detected == MACHINE_AMSTRAD_CPC ? "Amstrad CPC" :
         "Unknown");
 
-    // Pure beeper detection: delete file if only ULA writes present
+    // Pure beeper track detection
     if (result.spectrum_port_count == 0 &&
         result.cpc_port_count == 0 &&
         ula_port_count > 0) {
         printf("[INFO] Pure beeper track detected.\n");
-		result.detected = MACHINE_UNKNOWN;
+        result.detected = MACHINE_UNKNOWN;
     }
 }
 
@@ -769,7 +783,7 @@ void parse_points_data_and_emulate(const uint8_t* file, size_t size, size_t p_po
     // Set 0xFB (EI) at 0x0038 as required by spec
     ctx.memory[0x0038] = 0xFB;
     
-    load_blocks(file, size, p_addresses_offset);
+    load_blocks(file, size, init, p_addresses_offset);
 	if (result.detected == MACHINE_UNKNOWN) {
 		printf("\tNo valid AY ports detected, skipping emulation.\n");
 		delete_file_if_exists(output_file);
