@@ -10,11 +10,32 @@ void* context = &ctx;
 
 static Z80_STATE cpu;
 
+MachineDetectionResult result;
+
+#include <stdio.h>
+#include <stdlib.h>
+
+void delete_file_if_exists(const char* filename) {
+    FILE* file = fopen(filename, "r");
+    if (file) {
+        fclose(file);
+        if (remove(filename) == 0) {
+            printf("[INFO] Deleted file: %s\n", filename);
+        }
+        else {
+            perror("[ERROR] Failed to delete file");
+        }
+    }
+    else {
+        // File does not exist — no action needed
+        printf("[INFO] File not found (no need to delete): %s\n", filename);
+    }
+}
+
 // System call handler
 void SystemCall(AY2YM* ctx) {
     uint16_t pc = cpu.pc;
     uint8_t a = cpu.registers.byte[Z80_A];
-    //printf("SystemCall at PC=0x%04X, A=0x%02X\n", pc, a);
 
     if (pc == 0xFFFF) {
         ctx->is_done = 1;
@@ -23,20 +44,22 @@ void SystemCall(AY2YM* ctx) {
 
 uint8_t ay2ym_in(void* context, uint16_t port, uint64_t elapsed_cycles) {
     AY2YM* ctx = (AY2YM*)context;
-    uint8_t value = 0xFF;  // default value if no port matched
+    uint8_t value = 0xFF;
+    uint8_t port_hi_masked = (port >> 8) & CPC_PORT_MASK;
 
+    // ZX Spectrum ports
     if (port == 0xBFFD) {
-        // Read from AY register selected by addr_latch
         value = ctx->ay_regs[ctx->addr_latch];
     }
     else if ((port & 0xFF) == 0xFE) {
-        // Read beeper state (only low 8 bits of port matter here)
         value = ctx->beeper;
     }
+    // CPC ports reads for AY registers
+    else if (port_hi_masked == (0xF5 & CPC_PORT_MASK) || port_hi_masked == (0xF7 & CPC_PORT_MASK)) {
+        value = ctx->ay_regs[ctx->addr_latch];
+    }
     else {
-        // Unknown port: handle system call or default input
         SystemCall(ctx);
-        value = 0xFF;
     }
 
     return value;
@@ -44,21 +67,67 @@ uint8_t ay2ym_in(void* context, uint16_t port, uint64_t elapsed_cycles) {
 
 void ay2ym_out(void* context, uint16_t port, uint8_t value, uint64_t elapsed_cycles) {
     AY2YM* ctx = (AY2YM*)context;
+    uint8_t port_hi = (port >> 8);
+    uint8_t port_hi_masked = port_hi & CPC_PORT_MASK;
 
+    // ZX Spectrum handling
     if (port == 0xFFFD) {
-        // Select AY register index (lower 4 bits only)
         ctx->addr_latch = value & 0x0F;
     }
     else if (port == 0xBFFD) {
-        // Write value to selected AY register
         ctx->ay_regs[ctx->addr_latch] = value;
     }
     else if ((port & 0xFF) == 0xFE) {
-        // Set beeper on/off depending on bit 4 of value
         ctx->beeper = (value & 0x10) ? 1 : 0;
     }
+    // CPC ports handling
+    else if (port_hi_masked == (0xF4 & CPC_PORT_MASK)) {
+        ctx->CPCData = value;
+        // Here you might call CPCCheckPIO equivalent if needed
+    }
+    else if (port_hi_masked == (0xF6 & CPC_PORT_MASK)) {
+        uint8_t masked_val = value & 0xC0;
 
-    ctx->is_done = 0;  // signal that something changed / needs updating
+        if (ctx->CPCSwitch == 0) {
+            ctx->CPCSwitch = masked_val;
+        }
+        else if (masked_val == 0) {
+            switch (ctx->CPCSwitch) {
+            case 0xC0:
+                ctx->addr_latch = ctx->CPCData & 0x0F;
+                break;
+            case 0x80:
+                if (ctx->addr_latch < 14) {
+                    uint8_t filtered_val;
+                    switch (ctx->addr_latch) {
+                    case 1:
+                    case 3:
+                    case 5:
+                    case 13:
+                        filtered_val = ctx->CPCData & 0x0F;
+                        break;
+                    case 6:
+                    case 8:
+                    case 9:
+                    case 10:
+                        filtered_val = ctx->CPCData & 0x1F;
+                        break;
+                    case 7:
+                        filtered_val = ctx->CPCData & 0x3F;
+                        break;
+                    default:
+                        filtered_val = ctx->CPCData;
+                        break;
+                    }
+                    ctx->ay_regs[ctx->addr_latch] = filtered_val;
+                }
+                break;
+            }
+            ctx->CPCSwitch = 0;
+        }
+    }
+
+    ctx->is_done = 0;
 }
 
 static void pack_uint32_be(uint32_t value, unsigned char* out) {
@@ -141,7 +210,7 @@ void sanitize_filename_part(const char* src, char* dest, size_t max_len) {
     dest[j] = '\0';
 }
 
-char* create_filename_from_song(const char* input_name, const char* song_name) {
+char* create_filename_from_song(uint8_t index, const char* input_name, const char* song_name) {
     if (!input_name || !song_name) return NULL;
 
     // Find last path separator (either / or \)
@@ -157,7 +226,7 @@ char* create_filename_from_song(const char* input_name, const char* song_name) {
     // Extract original filename part
     const char* original_filename = last_slash ? last_slash + 1 : input_name;
 
-    // Sanitize filename part
+    // Sanitize original filename
     size_t filename_len = strlen(original_filename);
     char* safe_filename = (char*)malloc(filename_len + 1);
     if (!safe_filename) return NULL;
@@ -172,9 +241,9 @@ char* create_filename_from_song(const char* input_name, const char* song_name) {
     }
     sanitize_filename_part(song_name, safe_song, song_len + 1);
 
-    // Construct final string: [path][safe_filename] - [safe_song].ym
-    // Calculate length: path + sanitized filename + " - " + sanitized song + ".ym" + '\0'
-    size_t total_len = path_len + strlen(safe_filename) + 3 + strlen(safe_song) + 3 + 1;
+    // Construct final string: [path][safe_filename] - [XX] [safe_song].ym
+    // Max 2 digits + space = 3 chars for index part
+    size_t total_len = path_len + strlen(safe_filename) + 3 + 3 + strlen(safe_song) + 3 + 1;
 
     char* filename = (char*)malloc(total_len);
     if (!filename) {
@@ -187,8 +256,10 @@ char* create_filename_from_song(const char* input_name, const char* song_name) {
     if (path_len > 0) {
         memcpy(filename, input_name, path_len);
     }
-    // Format filename and song part
-    snprintf(filename + path_len, total_len - path_len, "%s - %s.ym", safe_filename, safe_song);
+
+    // Format filename: [safe_filename] - [XX] [safe_song].ym
+    snprintf(filename + path_len, total_len - path_len,
+        "%s - %02u %s.ym", safe_filename, index, safe_song);
 
     free(safe_filename);
     free(safe_song);
@@ -248,47 +319,153 @@ void dump_relative_pointer(const uint8_t* file, size_t size, size_t pointer_pos,
             file[abs_off], file[abs_off + 1], file[abs_off + 2]);
 }
 
-// Load memory blocks into ctx.memory
+// Port lookup utility
+bool is_port_in_list(uint8_t port, const uint8_t* list, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        if (port == list[i]) return true;
+    }
+    return false;
+}
+
+// Main load_blocks and detection function
 void load_blocks(const uint8_t* file, size_t size, size_t p_addresses_offset) {
+    result.detected = MACHINE_UNKNOWN;
+    result.spectrum_port_count = 0;
+    result.cpc_port_count = 0;
+    int ula_port_count = 0;
+
     if (p_addresses_offset == SIZE_MAX) {
         printf("\tNo blocks data\n");
         return;
     }
 
     size_t pos = p_addresses_offset;
+    uint16_t addr = 0;
+
     while (pos + 6 <= size) {
-        uint16_t addr = read_be16u(file + pos);
+        addr = read_be16u(file + pos);
         if (addr == 0) break;
 
         uint16_t length = read_be16u(file + pos + 2);
         int16_t offset_rel = read_be16s(file + pos + 4);
         size_t offset_abs = pos + 4 + offset_rel;
 
-        if (offset_abs + length > size) {
-            printf("\tInvalid block offset or length\n");
-            break;
+        // Clamp length if address + length exceeds memory size
+        if ((uint32_t)addr + length > 65536) {
+            length = 65536 - addr;
+            printf("\tClamped length to 0x%X due to memory size\n", length);
         }
 
-        if (addr + length > sizeof(ctx.memory)) {
-            printf("\tBlock addr+length exceeds memory size\n");
+        // Clamp length if offset_abs + length exceeds file size
+        if (offset_abs + length > size) {
+            length = (size > offset_abs ? size - offset_abs : 0) > UINT16_MAX
+                ? UINT16_MAX
+                : (uint16_t)(size > offset_abs ? size - offset_abs : 0);
+            printf("\tClamped length to 0x%X due to file size\n", length);
+        }
+
+        if (length == 0) {
+            printf("\tZero length block after clamping, skipping\n");
             break;
         }
 
         memcpy(ctx.memory + addr, file + offset_abs, length);
-        printf("\tCopying block addr=0x%04X length=0x%X from file offset=0x%lX\n", addr, length, (unsigned long)offset_abs);
-        printf("\tSource bytes: ");
-        for (int i = 0; i < 16 && i < length; i++) {
-            printf("%02X ", file[offset_abs + i]);
-        }
-        printf("\n\tDest bytes:   ");
-        for (int i = 0; i < 16 && i < length; i++) {
-            printf("%02X ", ctx.memory[addr + i]);
-        }
-        printf("\n");
+        printf("\tCopying block addr=0x%04X length=0x%X from file offset=0x%lX\n\n",
+            addr, length, (unsigned long)offset_abs);
 
-        printf("\tLoaded block at 0x%04X, length 0x%04X from offset 0x%04zX\n\n", addr, length, offset_abs);
+        for (size_t i = 0; i + 3 < length; i++) {
+            uint8_t opcode = ctx.memory[addr + i];
+            uint8_t operand = ctx.memory[addr + i + 1];
+
+            // OUT (C),r family (ED 41,49,51,59,61,69,79)
+            if (opcode == 0xED &&
+                (operand == 0x41 || operand == 0x49 || operand == 0x51 ||
+                 operand == 0x59 || operand == 0x61 || operand == 0x69 ||
+                 operand == 0x79)) {
+
+                uint16_t port = (ctx.memory[addr + i + 3] << 8) | ctx.memory[addr + i + 2];
+                uint8_t port_hi_masked = (port >> 8) & CPC_PORT_MASK;
+
+                printf("\t[DBG] OUT (C),r opcode 0x%02X to 0x%04X at 0x%04zX - CPC mask: 0x%X\n",
+                    operand, port, addr + i, port_hi_masked);
+
+                bool detected = false;
+
+                if (port_hi_masked == (0xF4 >> 8 & CPC_PORT_MASK) ||
+                    port_hi_masked == (0xF6 >> 8 & CPC_PORT_MASK)) {
+                    result.cpc_port_count++;
+                    printf("\t[DBG] Detected as CPC AY port\n");
+                    detected = true;
+                }
+
+                uint16_t bbb = (port & 0x0E00) >> 9;
+                if (bbb <= 7) {
+                    result.cpc_port_count++;
+                    printf("\t[DBG] Detected as CPC 4MB extension port (bbb = %u)\n", bbb);
+                    detected = true;
+                }
+
+                if (!detected)
+                    printf("\t[DBG] OUT (C),r to 0x%04X at 0x%04zX undetected\n", port, addr + i);
+            }
+
+            // OUT (n),A (D3 nn)
+            if (opcode == 0xD3) {
+                uint8_t port = ctx.memory[addr + i + 1];
+                printf("\t[DBG] OUT (n),A to 0x%02X at 0x%04lX\n", port, (unsigned long)(addr + i));
+
+                bool detected = false;
+
+                if (port == 0xFD || port == 0xBB) {
+                    result.spectrum_port_count++;
+                    printf("\t[DBG] Detected as ZX Spectrum AY port\n");
+                    detected = true;
+                }
+
+                if ((port & CPC_PORT_MASK) == (0xF4 & CPC_PORT_MASK) ||
+                    (port & CPC_PORT_MASK) == (0xF6 & CPC_PORT_MASK)) {
+                    result.cpc_port_count++;
+                    printf("\t[DBG] Detected as CPC AY port (OUT n,A)\n");
+                    detected = true;
+                }
+
+                if (port == 0xFE) {
+                    ula_port_count++;
+                    printf("\t[DBG] Detected as ZX Spectrum ULA port write (0xFE)\n");
+                    detected = true;
+                }
+
+                if (!detected)
+                    printf("\t[DBG] OUT (n),A to 0x%02X at 0x%04lX undetected\n", port, (unsigned long)(addr + i));
+            }
+        }
 
         pos += 6;
+    }
+
+    // Final detection decision
+    if (result.spectrum_port_count > result.cpc_port_count) {
+        result.detected = MACHINE_ZX_SPECTRUM;
+    } else if (result.cpc_port_count > result.spectrum_port_count) {
+        result.detected = MACHINE_AMSTRAD_CPC;
+    } else {
+        result.detected = MACHINE_UNKNOWN;
+    }
+
+    printf("\nAmstrad CPC AY port count: %d\n", result.cpc_port_count);
+    printf("ZX Spectrum AY port count: %d\n", result.spectrum_port_count);
+    printf("ZX Spectrum ULA port writes: %d\n", ula_port_count);
+    printf("Detected machine: %s\n\n",
+        result.detected == MACHINE_ZX_SPECTRUM ? "ZX Spectrum" :
+        result.detected == MACHINE_AMSTRAD_CPC ? "Amstrad CPC" :
+        "Unknown");
+
+    // Pure beeper detection: delete file if only ULA writes present
+    if (result.spectrum_port_count == 0 &&
+        result.cpc_port_count == 0 &&
+        ula_port_count > 0) {
+        printf("[INFO] Pure beeper track detected.\n");
+		result.detected = MACHINE_UNKNOWN;
     }
 }
 
@@ -367,7 +544,9 @@ static void emulate_song(
 
     setup_cpu(stack, hi_reg, lo_reg);
 
-    const uint64_t cpu_clock = 3500000ULL;
+    const uint64_t cpu_clock = (result.detected == MACHINE_AMSTRAD_CPC) ? 4000000ULL : 3500000ULL;
+	printf("CPU clock: %llu Hz\n", cpu_clock);
+
     const uint64_t int_tstates = cpu_clock / FRAME_RATE;
     uint64_t total_cycles = (uint64_t)(song_length + fade_length) * int_tstates;
 
@@ -379,7 +558,6 @@ static void emulate_song(
     const int step_cycles = 100;
     int frame_number = 0;
 
-    char* output_file = create_filename_from_song(orig_file_name, song_name);
     FILE* ym_file = fopen(output_file, "wb");
     if (NULL == ym_file) {
         printf("Can't open output file '%s'\n", output_file);
@@ -415,7 +593,8 @@ static void emulate_song(
     append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 2, ym_file);
 
     // Master clock
-    pack_uint32_be(YM_CLOCK, packed);
+    pack_uint32_be(result.detected == MACHINE_AMSTRAD_CPC ? AMSTRAD_CPC_CLOCK : ZX_SPECTRUM_CLOCK, packed);
+	printf("Master clock: %u Hz\n", (unsigned int)(result.detected == MACHINE_AMSTRAD_CPC ? AMSTRAD_CPC_CLOCK : ZX_SPECTRUM_CLOCK));
     append_bytes(&ym_data, &ym_size, &ym_capacity, packed, 4, ym_file);
 
     // Player frequency
@@ -457,7 +636,9 @@ static void emulate_song(
         cycles += elapsed;
 
         if (cycles >= next_frame) {
-            if (cpu.iff1 == 1) Z80Interrupt(&cpu, 0, &ctx);
+            if (cpu.iff1 == 1) {
+                Z80Interrupt(&cpu, 0, &ctx);
+            }
 
             if (tone_size + 16 > tone_capacity) {
                 tone_capacity *= 2;
@@ -585,8 +766,14 @@ void parse_points_data_and_emulate(const uint8_t* file, size_t size, size_t p_po
 
     // Set 0xFB (EI) at 0x0038 as required by spec
     ctx.memory[0x0038] = 0xFB;
-
+    
     load_blocks(file, size, p_addresses_offset);
+	if (result.detected == MACHINE_UNKNOWN) {
+		printf("\tNo valid AY ports detected, skipping emulation.\n");
+		delete_file_if_exists(output_file);
+
+		return;
+	}
     emulate_song(stack, init, song_length, fade_length, hi_reg, lo_reg, interrupt);
 }
 
@@ -680,6 +867,7 @@ void parse_song_structure_table(const uint8_t* file, size_t size, size_t table_o
         song_name = (song_name_ptr != SIZE_MAX) ? read_ntstring(file, size, song_name_ptr) : "(invalid)";
         printf("\nSong %d: %s\n", i, song_name);
 
+        output_file = create_filename_from_song(i, orig_file_name, song_name);
         parse_song_data(file, size, song_data_ptr);
     }
 }
@@ -716,7 +904,7 @@ void parse_ay_file(const uint8_t* file, size_t size) {
     else
         printf("Invalid misc pointer\n");
 
-    size_t p_song_structures_abs = 18 + p_song_structures;
+    size_t p_song_structures_abs = static_cast<size_t>(18) + p_song_structures;
 
     parse_song_structure_table(file, size, p_song_structures_abs, num_songs);
 }

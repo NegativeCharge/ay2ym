@@ -15,11 +15,53 @@
 #define strdup _strdup
 #endif
 
-#define YM_CLOCK 1773400      // ZX Spectrum Chip Frequency
+#define ZX_SPECTRUM_CLOCK 1773400      // ZX Spectrum Chip Frequency
+#define AMSTRAD_CPC_CLOCK 1000000      // Amstrad CPC Chip Frequency
 #define FRAME_RATE 50
 #define FRAME_COUNT_OFFSET 12
 
- // AY to YM emulator context structure
+// Max ports per system
+#define MAX_PORTS 8
+#define CPC_PORT_MASK 0x0B
+
+struct MachinePortSet {
+    const char* name;
+    uint8_t out_ports[MAX_PORTS];
+    size_t   out_port_count;
+};
+
+// ZX Spectrum AY ports
+static const struct MachinePortSet spectrum_ports = {
+    "ZX Spectrum",
+    { 0xFD, 0xFF, 0xBB },
+    3
+};
+
+// Amstrad CPC AY port high-byte masks
+const uint8_t cpc_port_hi_masks[] = { 0xF4, 0xF6 };
+const size_t cpc_port_hi_mask_count = 2;
+
+
+// AY to YM emulator context structure
+typedef enum {
+    PSG_INACTIVE = 0,
+    PSG_LATCH_ADDR = 1,
+    PSG_WRITE = 2,
+    PSG_READ = 3
+} PSG_Mode;
+
+typedef enum {
+    MACHINE_UNKNOWN = 0,
+    MACHINE_ZX_SPECTRUM,
+    MACHINE_AMSTRAD_CPC
+} MachineType;
+
+typedef struct {
+    MachineType detected;
+    int spectrum_port_count;
+    int cpc_port_count;
+} MachineDetectionResult;
+
 typedef struct AY2YM {
     Z80_STATE state;          // Z80 CPU state
     uint8_t memory[0x10000];  // 64KB RAM
@@ -27,11 +69,14 @@ typedef struct AY2YM {
     uint8_t ay_regs[16];      // AY registers
     uint8_t beeper;           // beeper state (bit 4)
     uint8_t is_done;          // emulation done flag
+    uint8_t addr_latch;       // latched AY register index
 
-    // Add this:
-    uint8_t addr_latch;     // latched AY register index
+    // CPC-specific state
+    uint8_t CPCData;
+    uint8_t CPCSwitch;
 } AY2YM;
 
+const char* output_file = NULL;
 const char* orig_file_name = NULL;
 const char* song_name = NULL;
 const char* author = NULL;
