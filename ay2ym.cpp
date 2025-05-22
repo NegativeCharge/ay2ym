@@ -377,36 +377,38 @@ void load_blocks(const uint8_t* file, size_t size, size_t p_addresses_offset) {
             uint8_t opcode = ctx.memory[addr + i];
             uint8_t operand = ctx.memory[addr + i + 1];
 
-            // OUT (C),r family (ED 41,49,51,59,61,69,79)
             if (opcode == 0xED &&
                 (operand == 0x41 || operand == 0x49 || operand == 0x51 ||
-                 operand == 0x59 || operand == 0x61 || operand == 0x69 ||
-                 operand == 0x79)) {
+                    operand == 0x59 || operand == 0x61 || operand == 0x69 ||
+                    operand == 0x79)) {
 
                 uint16_t port = (ctx.memory[addr + i + 3] << 8) | ctx.memory[addr + i + 2];
-                uint8_t port_hi_masked = (port >> 8) & CPC_PORT_MASK;
+                uint8_t port_hi = port >> 8;
 
-                printf("\t[DBG] OUT (C),r opcode 0x%02X to 0x%04X at 0x%04zX - CPC mask: 0x%X\n",
-                    operand, port, addr + i, port_hi_masked);
+                printf("\t[DBG] OUT (C),r opcode 0x%02X to 0x%04X at 0x%04zX\n",
+                    operand, port, addr + i);
 
                 bool detected = false;
 
-                if (port_hi_masked == (0xF4 >> 8 & CPC_PORT_MASK) ||
-                    port_hi_masked == (0xF6 >> 8 & CPC_PORT_MASK)) {
-                    result.cpc_port_count++;
-                    printf("\t[DBG] Detected as CPC AY port\n");
+                // ZX Spectrum AY ports are always 0xFDxx
+                if ((port & 0xFF00) == 0xFD00) {
+                    result.spectrum_port_count++;
+                    printf("\t[DBG] Detected as ZX Spectrum AY port (OUT (C),r)\n");
                     detected = true;
                 }
-
-                uint16_t bbb = (port & 0x0E00) >> 9;
-                if (bbb <= 7) {
-                    result.cpc_port_count++;
-                    printf("\t[DBG] Detected as CPC 4MB extension port (bbb = %u)\n", bbb);
-                    detected = true;
+                // CPC AY ports are 4MB extension ports with bbb = 0-7, but avoid 0xF0-0xFF for Spectrum
+                else if (port_hi < 0xF0) {
+                    uint16_t bbb = (port & 0x0E00) >> 9;
+                    if (bbb <= 7) {
+                        result.cpc_port_count++;
+                        printf("\t[DBG] Detected as CPC 4MB extension port (bbb = %u)\n", bbb);
+                        detected = true;
+                    }
                 }
 
-                if (!detected)
+                if (!detected) {
                     printf("\t[DBG] OUT (C),r to 0x%04X at 0x%04zX undetected\n", port, addr + i);
+                }
             }
 
             // OUT (n),A (D3 nn)
